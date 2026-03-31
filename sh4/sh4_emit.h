@@ -742,6 +742,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_store_reg_pc_thumb(ireg, rd)                                 \
   generate_store_reg(ireg, rd);                                               \
   if(rd == 15) {                                                              \
+    if ((ireg) != a0) { generate_mov(a0, ireg); }                             \
     generate_indirect_branch_cycle_update(thumb);                             \
   }
 
@@ -1705,6 +1706,7 @@ u32 execute_spsr_restore(u32 address)
   generate_load_pc(a1, pc);                                                   \
   generate_function_call(execute_load_u32);                                   \
   generate_store_reg(rv, REG_PC);                                             \
+  generate_mov(a0, rv); /* a0 = loaded PC (rv/a0 differ on SH4) */            \
   generate_indirect_branch_cycle_update(thumb)
 
 #define thumb_block_memory_extra_push_lr(base_reg)                            \
