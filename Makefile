@@ -1,8 +1,7 @@
 # gpSP standalone SDL 1.2 build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= PC
+PLATFORM ?= DC
 
-DEBUG ?= 0
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
 MMAP_JIT_CACHE ?= 0
@@ -18,7 +17,7 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   += -Os -ffast-math -DDREAMCAST -DSMALL_TRANSLATION_CACHE
+   CFLAGS   += -O1 -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
    LIBS     := -lm -lSDL
 else
@@ -99,13 +98,7 @@ ifeq ($(HAVE_DYNAREC), 1)
    endif
 endif
 
-# Optimization
-ifeq ($(DEBUG), 1)
-   OPTIMIZE := -O0 -g
-else
-   OPTIMIZE := -O2 -DNDEBUG
-endif
-
+ 
 DEFINES := -DHAVE_STRINGS_H -DHAVE_STDINT_H -DHAVE_INTTYPES_H -DINLINE=inline -Wall
 
 ifeq ($(HAVE_DYNAREC), 1)
