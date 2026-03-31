@@ -16,9 +16,9 @@ CXX ?= g++
 
 CORE_DIR := .
 
-# SDL2
-SDL_CFLAGS  := $(shell sdl2-config --cflags 2>/dev/null)
-SDL_LDFLAGS := $(shell sdl2-config --libs 2>/dev/null)
+# SDL 1.2
+SDL_CFLAGS  := $(shell sdl-config --cflags 2>/dev/null)
+SDL_LDFLAGS := $(shell sdl-config --libs 2>/dev/null)
 
 INCFLAGS := -I$(CORE_DIR)
 

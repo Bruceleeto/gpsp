@@ -1,7 +1,6 @@
-/* gpSP standalone SDL2 frontend
+/* gpSP standalone SDL 1.2 frontend
  *
- * Replaces the libretro frontend with a built-in SDL2 backend.
- * Handles video, audio, and input directly.
+ * Built-in SDL backend handling video, audio, and input.
  */
 
 #include <stdio.h>
@@ -19,7 +18,7 @@
 
 #define WINDOW_SCALE 3
 
-/* ---- Globals the core expects (normally in libretro.c) ---- */
+/* ---- Globals the core expects ---- */
 u32 skip_next_frame = 0;
 u32 num_skipped_frames = 0;
 #ifdef HAVE_DYNAREC
@@ -51,10 +50,8 @@ void set_fastforward_override(bool fastforward)
 }
 
 /* ---- SDL state ---- */
-static SDL_Window   *sdl_window   = NULL;
-static SDL_Renderer *sdl_renderer = NULL;
-static SDL_Texture  *sdl_texture  = NULL;
-static SDL_AudioDeviceID sdl_audio_dev = 0;
+static SDL_Surface *screen    = NULL;
+static SDL_Surface *gba_surface = NULL;
 
 static int running = 1;
 static u32 sdl_key_state = 0;
@@ -111,19 +108,19 @@ static void sdl_poll_input(void)
          case SDL_KEYUP:
          {
             u32 btn = 0;
-            switch (ev.key.keysym.scancode)
+            switch (ev.key.keysym.sym)
             {
-               case SDL_SCANCODE_X:      btn = BUTTON_A;      break;
-               case SDL_SCANCODE_Z:      btn = BUTTON_B;      break;
-               case SDL_SCANCODE_RETURN: btn = BUTTON_START;  break;
-               case SDL_SCANCODE_RSHIFT: btn = BUTTON_SELECT; break;
-               case SDL_SCANCODE_UP:     btn = BUTTON_UP;     break;
-               case SDL_SCANCODE_DOWN:   btn = BUTTON_DOWN;   break;
-               case SDL_SCANCODE_LEFT:   btn = BUTTON_LEFT;   break;
-               case SDL_SCANCODE_RIGHT:  btn = BUTTON_RIGHT;  break;
-               case SDL_SCANCODE_A:      btn = BUTTON_L;      break;
-               case SDL_SCANCODE_S:      btn = BUTTON_R;      break;
-               case SDL_SCANCODE_ESCAPE:
+               case SDLK_x:      btn = BUTTON_A;      break;
+               case SDLK_z:      btn = BUTTON_B;      break;
+               case SDLK_RETURN: btn = BUTTON_START;  break;
+               case SDLK_RSHIFT: btn = BUTTON_SELECT; break;
+               case SDLK_UP:     btn = BUTTON_UP;     break;
+               case SDLK_DOWN:   btn = BUTTON_DOWN;   break;
+               case SDLK_LEFT:   btn = BUTTON_LEFT;   break;
+               case SDLK_RIGHT:  btn = BUTTON_RIGHT;  break;
+               case SDLK_a:      btn = BUTTON_L;      break;
+               case SDLK_s:      btn = BUTTON_R;      break;
+               case SDLK_ESCAPE:
                   if (ev.type == SDL_KEYDOWN) running = 0;
                   break;
                default: break;
@@ -154,40 +151,34 @@ int main(int argc, char *argv[])
       return 1;
    }
 
-   sdl_window = SDL_CreateWindow("gpSP",
-      SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+   SDL_WM_SetCaption("gpSP", NULL);
+
+   screen = SDL_SetVideoMode(
       GBA_SCREEN_WIDTH * WINDOW_SCALE,
       GBA_SCREEN_HEIGHT * WINDOW_SCALE,
-      SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-   if (!sdl_window)
+      16, SDL_SWSURFACE);
+   if (!screen)
    {
-      fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+      fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError());
       SDL_Quit();
       return 1;
    }
 
-   sdl_renderer = SDL_CreateRenderer(sdl_window, -1,
-      SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-   if (!sdl_renderer)
-      sdl_renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_SOFTWARE);
-
-   SDL_RenderSetLogicalSize(sdl_renderer, GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT);
-
-   sdl_texture = SDL_CreateTexture(sdl_renderer,
-      SDL_PIXELFORMAT_RGB565, SDL_TEXTUREACCESS_STREAMING,
-      GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT);
+   /* Off-screen surface matching GBA framebuffer (RGB565) */
+   gba_surface = SDL_CreateRGBSurface(SDL_SWSURFACE,
+      GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, 16,
+      0xF800, 0x07E0, 0x001F, 0);
 
    /* ---- Audio ---- */
-   SDL_AudioSpec want;
-   SDL_memset(&want, 0, sizeof(want));
+   SDL_AudioSpec want, have;
+   memset(&want, 0, sizeof(want));
    want.freq     = GBA_SOUND_FREQUENCY;
    want.format   = AUDIO_S16SYS;
    want.channels = 2;
    want.samples  = 1024;
    want.callback = sdl_audio_callback;
 
-   sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
-   if (!sdl_audio_dev)
+   if (SDL_OpenAudio(&want, &have) < 0)
       fprintf(stderr, "SDL audio failed: %s\n", SDL_GetError());
 
    /* ---- Emulator init ---- */
@@ -251,19 +242,21 @@ int main(int argc, char *argv[])
    }
    printf("Loaded ROM: %s\n", rom_path);
 
-   /* Wire up input: reuse input.c by providing our SDL callback */
+   /* Wire up input */
    set_input_state(sdl_input_state_cb);
 
    /* Reset GBA */
    reset_gba();
 
    /* Start audio playback */
-   if (sdl_audio_dev)
-      SDL_PauseAudioDevice(sdl_audio_dev, 0);
+   SDL_PauseAudio(0);
 
    /* ---- Main loop ---- */
    Uint32 frame_ms    = (Uint32)(1000.0f / GBA_FPS);
    Uint32 last_ticks  = SDL_GetTicks();
+   SDL_Rect dst_rect  = { 0, 0,
+      GBA_SCREEN_WIDTH * WINDOW_SCALE,
+      GBA_SCREEN_HEIGHT * WINDOW_SCALE };
 
    while (running)
    {
@@ -282,14 +275,16 @@ int main(int argc, char *argv[])
          execute_arm(execute_cycles);
       }
 
-      /* Present video */
-      SDL_UpdateTexture(sdl_texture, NULL,
-                        gba_screen_pixels, GBA_SCREEN_PITCH * 2);
-      SDL_RenderClear(sdl_renderer);
-      SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL);
-      SDL_RenderPresent(sdl_renderer);
+      /* Present video: copy GBA pixels to surface, then scale-blit */
+      SDL_LockSurface(gba_surface);
+      memcpy(gba_surface->pixels, gba_screen_pixels,
+             GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * 2);
+      SDL_UnlockSurface(gba_surface);
 
-      /* Frame pacing (vsync handles most of it, this is a fallback) */
+      SDL_SoftStretch(gba_surface, NULL, screen, &dst_rect);
+      SDL_Flip(screen);
+
+      /* Frame pacing */
       Uint32 now     = SDL_GetTicks();
       Uint32 elapsed = now - last_ticks;
       if (elapsed < frame_ms)
@@ -298,11 +293,8 @@ int main(int argc, char *argv[])
    }
 
    /* ---- Cleanup ---- */
-   if (sdl_audio_dev)
-      SDL_CloseAudioDevice(sdl_audio_dev);
-   SDL_DestroyTexture(sdl_texture);
-   SDL_DestroyRenderer(sdl_renderer);
-   SDL_DestroyWindow(sdl_window);
+   SDL_CloseAudio();
+   SDL_FreeSurface(gba_surface);
    SDL_Quit();
 
    memory_term();
