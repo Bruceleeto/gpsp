@@ -1546,6 +1546,17 @@ cpu_alert_type function_cc write_memory32(u32 address, u32 value)
   return CPU_ALERT_NONE;
 }
 
+/* Dynarec memory access wrappers (called from JIT-generated code) */
+u32 function_cc execute_load_u8(u32 address)  { return read_memory8(address); }
+u32 function_cc execute_load_u16(u32 address) { return read_memory16(address); }
+u32 function_cc execute_load_u32(u32 address) { return read_memory32(address); }
+u32 function_cc execute_load_s8(u32 address)  { return (s32)(s8)read_memory8(address); }
+u32 function_cc execute_load_s16(u32 address) { return (s32)(s16)read_memory16_signed(address); }
+void function_cc execute_store_u8(u32 address, u32 source)  { write_memory8(address, (u8)source); }
+void function_cc execute_store_u16(u32 address, u32 source) { write_memory16(address, (u16)source); }
+void function_cc execute_store_u32(u32 address, u32 source) { write_memory32(address, source); }
+void function_cc execute_store_aligned_u32(u32 address, u32 source) { write_memory32(address & ~3, source); }
+
 typedef struct
 {
    char gamepak_code[5];

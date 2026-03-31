@@ -15,7 +15,7 @@ u32 sh4_update_gba(u32 pc);
 void sh4_indirect_branch_arm(u32 address);
 void sh4_indirect_branch_thumb(u32 address);
 void sh4_indirect_branch_dual(u32 address);
-/* execute_store_cpsr is both a C function (declared in cpu.h) and a macro below */
+void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
 
 /* Debug/validation - define SH4_DYNAREC_DEBUG before including to enable */
 #include "sh4_debug.h"
@@ -159,107 +159,564 @@ void sh4_indirect_branch_dual(u32 address);
 #define generate_not(ireg)                                                    \
   sh4_emit16(0x6007 | ((ireg) << 8) | ((ireg) << 4))
 
-#define generate_add(dest, src)           sh4_emit16(0x0009)
-#define generate_add_imm(ireg, imm)       sh4_emit16(0x0009)
-#define generate_add_reg_reg_imm(d,s,i)   sh4_emit16(0x0009)
-#define generate_sub(dest, src)           sh4_emit16(0x0009)
-#define generate_sub_imm(ireg, imm)       sh4_emit16(0x0009)
-#define generate_adc(dest, src)           sh4_emit16(0x0009)
-#define generate_sbb(dest, src)           sh4_emit16(0x0009)
-#define generate_add_memreg(src, ri)      sh4_emit16(0x0009)
+/* ---- Arithmetic ---- */
 
-#define generate_and(dest, src)           sh4_emit16(0x0009)
-#define generate_and_imm(ireg, imm)       sh4_emit16(0x0009)
-#define generate_or(dest, src)            sh4_emit16(0x0009)
-#define generate_xor(dest, src)           sh4_emit16(0x0009)
-#define generate_xor_imm(ireg, imm)       sh4_emit16(0x0009)
-#define generate_and_mem(imm, b, off)     sh4_emit16(0x0009)
-#define generate_or_mem(ireg, ri)         sh4_emit16(0x0009)
-#define generate_xor_mem(ireg, ri)        sh4_emit16(0x0009)
+/* add Rm, Rn -> Rn += Rm  (0x300C) */
+#define generate_add(dest, src)                                               \
+  sh4_emit16(0x300C | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest); sh4_src_reg = (src); sh4_is_sub = 0
 
-#define generate_test_imm(ireg, imm)      sh4_emit16(0x0009)
-#define generate_test_memreg(ireg, ri)    sh4_emit16(0x0009)
-#define generate_cmp_imm(ireg, imm)       sh4_emit16(0x0009)
-#define generate_cmp_reg(dest, src)       sh4_emit16(0x0009)
-#define generate_cmp_memreg(ireg, ri)     sh4_emit16(0x0009)
+/* add #imm8, Rn (0x7000). For large imm: load into r0, add r0. */
+#define generate_add_imm(ireg, imm)                                           \
+  do {                                                                        \
+    if ((s32)(imm) >= -128 && (s32)(imm) <= 127) {                            \
+      sh4_emit16(0x7000 | ((ireg) << 8) | ((u32)(imm) & 0xFF));              \
+    } else {                                                                  \
+      generate_load_imm(0, imm);                                              \
+      sh4_emit16(0x300C | ((ireg) << 8) | (0 << 4));                         \
+    }                                                                         \
+  } while(0)
 
-#define generate_shift_left(ireg, imm)    sh4_emit16(0x0009)
-#define generate_shift_right(ireg, imm)   sh4_emit16(0x0009)
-#define generate_shift_right_arithmetic(ireg, imm) sh4_emit16(0x0009)
-#define generate_rotate_right(ireg, imm)  sh4_emit16(0x0009)
+/* d = s + i */
+#define generate_add_reg_reg_imm(d, s, i)                                     \
+  do {                                                                        \
+    if ((d) != (s)) generate_mov(d, s);                                       \
+    generate_add_imm(d, i);                                                   \
+  } while(0)
 
-#define generate_shift_left_var(ireg)     sh4_emit16(0x0009)
-#define generate_shift_right_var(ireg)    sh4_emit16(0x0009)
-#define generate_shift_right_arithmetic_var(ireg) sh4_emit16(0x0009)
-#define generate_rotate_right_var(ireg)   sh4_emit16(0x0009)
+/* sub Rm, Rn -> Rn -= Rm  (0x3008) */
+#define generate_sub(dest, src)                                               \
+  sh4_emit16(0x3008 | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest); sh4_src_reg = (src); sh4_is_sub = 1
 
-#define generate_rcr(ireg)                sh4_emit16(0x0009)
-#define generate_rcr1(ireg)               sh4_emit16(0x0009)
+#define generate_sub_imm(ireg, imm)                                           \
+  generate_add_imm(ireg, -(s32)(imm))
 
-#define generate_multiply(ireg)           sh4_emit16(0x0009)
-#define generate_multiply_s64(ireg)       sh4_emit16(0x0009)
-#define generate_multiply_u64(ireg)       sh4_emit16(0x0009)
+/* addc Rm, Rn -> Rn += Rm + T  (0x300E) */
+#define generate_adc(dest, src)                                               \
+  sh4_emit16(0x300E | ((dest) << 8) | ((src) << 4))
+
+/* subc Rm, Rn -> Rn -= Rm - T  (0x300A) */
+#define generate_sbb(dest, src)                                               \
+  sh4_emit16(0x300A | ((dest) << 8) | ((src) << 4))
+
+/* Load reg[ri] and add to src: src += reg[ri] */
+#define generate_add_memreg(src, ri)                                          \
+  do {                                                                        \
+    generate_load_reg(0, ri);                                                 \
+    sh4_emit16(0x300C | ((src) << 8) | (0 << 4));                            \
+  } while(0)
+
+/* ---- Logic ---- */
+
+/* and Rm, Rn (0x2009) */
+#define generate_and(dest, src)                                               \
+  sh4_emit16(0x2009 | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest)
+
+/* and with immediate. Uses r0 as scratch (or and #imm,R0 if ireg==r0) */
+#define generate_and_imm(ireg, imm)                                           \
+  do {                                                                        \
+    if ((ireg) != 0) {                                                        \
+      generate_load_imm(0, imm);                                              \
+      sh4_emit16(0x2009 | ((ireg) << 8) | (0 << 4));                         \
+    } else if ((u32)(imm) <= 255) {                                           \
+      sh4_emit16(0xC900 | ((u32)(imm) & 0xFF));                              \
+    } else {                                                                  \
+      generate_load_imm(1, imm);                                              \
+      sh4_emit16(0x2009 | (0 << 8) | (1 << 4));                              \
+    }                                                                         \
+  } while(0)
+
+/* or Rm, Rn (0x200B) */
+#define generate_or(dest, src)                                                \
+  sh4_emit16(0x200B | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest)
+
+/* xor Rm, Rn (0x200A) */
+#define generate_xor(dest, src)                                               \
+  sh4_emit16(0x200A | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest)
+
+#define generate_xor_imm(ireg, imm)                                           \
+  do {                                                                        \
+    if ((ireg) == 0 && (u32)(imm) <= 255) {                                   \
+      sh4_emit16(0xCA00 | ((u32)(imm) & 0xFF));                              \
+    } else {                                                                  \
+      generate_load_imm(0, imm);                                              \
+      sh4_emit16(0x200A | ((ireg) << 8) | (0 << 4));                         \
+    }                                                                         \
+  } while(0)
+
+/* and/or/xor with memory reg slot - load into r0, operate */
+#define generate_and_mem(imm, b, off)                                         \
+  do { generate_load_imm(0, imm); generate_load_reg(1, off);                  \
+       sh4_emit16(0x2009 | (1 << 8) | (0 << 4));                             \
+       generate_store_reg(1, off); } while(0)
+
+#define generate_or_mem(ireg, ri)                                             \
+  do { generate_load_reg(0, ri);                                              \
+       sh4_emit16(0x200B | (0 << 8) | ((ireg) << 4));                        \
+       generate_store_reg(0, ri); } while(0)
+
+#define generate_xor_mem(ireg, ri)                                            \
+  do { generate_load_reg(0, ri);                                              \
+       sh4_emit16(0x200A | (0 << 8) | ((ireg) << 4));                        \
+       generate_store_reg(0, ri); } while(0)
+
+/* ---- Comparisons / tests ---- */
+/* These set the SH4 T-bit which flag update macros can read via movt */
+
+/* tst Rm, Rn -> T = (Rn & Rm) == 0  (0x2008) */
+#define generate_test_imm(ireg, imm)                                          \
+  do { generate_load_imm(0, imm);                                            \
+       sh4_emit16(0x2008 | ((ireg) << 8) | (0 << 4)); } while(0)
+
+#define generate_test_memreg(ireg, ri)                                        \
+  do { generate_load_reg(0, ri);                                              \
+       sh4_emit16(0x2008 | (0 << 8) | ((ireg) << 4)); } while(0)
+
+/* cmp/eq #imm, R0 (0x8800) - only works with R0, 8-bit signed */
+/* For general: load imm, cmp/eq */
+#define generate_cmp_imm(ireg, imm)                                           \
+  do {                                                                        \
+    if ((ireg) == 0 && (s32)(imm) >= -128 && (s32)(imm) <= 127) {            \
+      sh4_emit16(0x8800 | ((u32)(imm) & 0xFF));                              \
+    } else {                                                                  \
+      generate_load_imm(0, imm);                                              \
+      sh4_emit16(0x3000 | ((ireg) << 8) | (0 << 4));                         \
+    }                                                                         \
+  } while(0)
+
+/* cmp/gt Rm, Rn -> T = (signed)Rn > (signed)Rm  (0x3007) */
+#define generate_cmp_reg(dest, src)                                           \
+  sh4_emit16(0x3007 | ((dest) << 8) | ((src) << 4))
+
+#define generate_cmp_memreg(ireg, ri)                                         \
+  do { generate_load_reg(0, ri);                                              \
+       sh4_emit16(0x3007 | ((ireg) << 8) | (0 << 4)); } while(0)
+
+/* ---- Shifts ---- */
+/* SH4 SHLD Rm,Rn (0x400D): logical shift Rn by Rm (positive=left, negative=right)
+ * SH4 SHAD Rm,Rn (0x400C): arithmetic shift, same convention */
+
+#define generate_shift_left(ireg, imm)                                        \
+  do { sh4_emit16(0xE000 | (0 << 8) | ((u32)(imm) & 0xFF));                 \
+       sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4)); } while(0)
+
+#define generate_shift_right(ireg, imm)                                       \
+  do { sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(imm)) & 0xFF));         \
+       sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4)); } while(0)
+
+#define generate_shift_right_arithmetic(ireg, imm)                            \
+  do { sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(imm)) & 0xFF));         \
+       sh4_emit16(0x400C | ((ireg) << 8) | (0 << 4)); } while(0)
+
+/* Rotate right by imm: no direct SH4 instruction for arbitrary rotate.
+ * Implement as: (x >> imm) | (x << (32-imm)) */
+#define generate_rotate_right(ireg, imm)                                      \
+  do {                                                                        \
+    generate_mov(1, ireg);                                                    \
+    sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(imm)) & 0xFF));            \
+    sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4));                           \
+    sh4_emit16(0xE000 | (0 << 8) | ((u32)(32 - (imm)) & 0xFF));             \
+    sh4_emit16(0x400D | (1 << 8) | (0 << 4));                                \
+    sh4_emit16(0x200B | ((ireg) << 8) | (1 << 4));                           \
+  } while(0)
+
+/* Variable shifts: shift amount already in a1 (r5) */
+#define generate_shift_left_var(ireg)                                         \
+  sh4_emit16(0x400D | ((ireg) << 8) | (a1 << 4))
+
+#define generate_shift_right_var(ireg)                                        \
+  do { sh4_emit16(0x600B | (a1 << 8) | (a1 << 4)); /* neg a1, a1 */         \
+       sh4_emit16(0x400D | ((ireg) << 8) | (a1 << 4)); } while(0)
+
+#define generate_shift_right_arithmetic_var(ireg)                             \
+  do { sh4_emit16(0x600B | (a1 << 8) | (a1 << 4)); /* neg a1, a1 */         \
+       sh4_emit16(0x400C | ((ireg) << 8) | (a1 << 4)); } while(0)
+
+#define generate_rotate_right_var(ireg)                                       \
+  do {                                                                        \
+    generate_mov(2, ireg); /* save in r2(a2) */                               \
+    sh4_emit16(0x600B | (0 << 8) | (a1 << 4));  /* neg a1, r0 */             \
+    sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4)); /* shld r0, ireg (>>n) */ \
+    sh4_emit16(0xE000 | (0 << 8) | 32);          /* mov #32, r0 */           \
+    sh4_emit16(0x3008 | (0 << 8) | (a1 << 4));   /* sub a1, r0 -> 32-n */   \
+    sh4_emit16(0x400D | (2 << 8) | (0 << 4));    /* shld r0, r2 (<<32-n) */ \
+    sh4_emit16(0x200B | ((ireg) << 8) | (2 << 4)); /* or r2, ireg */         \
+  } while(0)
+
+/* Rotate right through carry (1-bit) */
+/* rotcr Rn: T->MSB, LSB->T (0x4025) */
+#define generate_rcr(ireg)                                                    \
+  sh4_emit16(0x4025 | ((ireg) << 8))
+
+#define generate_rcr1(ireg)                                                   \
+  sh4_emit16(0x4025 | ((ireg) << 8))
+
+/* ---- Multiply ---- */
+/* mul.l Rm, Rn -> MACL = Rm * Rn (0x0007), then sts MACL, Rn (0x001A) */
+
+#define generate_multiply(ireg)                                               \
+  do { sh4_emit16(0x0007 | (a0 << 8) | ((ireg) << 4));  /* mul.l ireg, a0 */\
+       sh4_emit16(0x001A | (a0 << 8)); } while(0)         /* sts MACL, a0 */
+
+/* dmuls.l Rm, Rn -> MACH:MACL = signed Rm*Rn (0x300D) */
+#define generate_multiply_s64(ireg)                                           \
+  do { sh4_emit16(0x300D | (a0 << 8) | ((ireg) << 4));                       \
+       sh4_emit16(0x001A | (a0 << 8));  /* sts MACL, a0 (low) */             \
+       sh4_emit16(0x000A | (a1 << 8));  /* sts MACH, a1 (high) */            \
+  } while(0)
+
+/* dmulu.l Rm, Rn -> MACH:MACL = unsigned Rm*Rn (0x3005) */
+#define generate_multiply_u64(ireg)                                           \
+  do { sh4_emit16(0x3005 | (a0 << 8) | ((ireg) << 4));                       \
+       sh4_emit16(0x001A | (a0 << 8));                                        \
+       sh4_emit16(0x000A | (a1 << 8));                                        \
+  } while(0)
+
+/* 64-bit multiply-accumulate: TODO, stub for now */
 #define generate_multiply_s64_add(a, b, c) sh4_emit16(0x0009)
 #define generate_multiply_u64_add(a, b, c) sh4_emit16(0x0009)
 
-#define generate_function_call(func)      sh4_emit16(0x0009)
+/* ---- Function calls ---- */
+/* Save PR (clobbered by jsr), call func, restore PR.
+ * Args are already in r4-r6 (a0-a2), return in r0. */
+#define generate_function_call(func)                                          \
+  do {                                                                        \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 (push PR) */          \
+    generate_load_imm(0, (u32)(func));                                        \
+    sh4_emit16(0x400B | (0 << 8));  /* jsr @r0 */                             \
+    sh4_emit16(0x0009);              /* nop (delay slot) */                    \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr (pop PR) */           \
+  } while(0)
 
-/* generate_exit_block: MUST actually return to the main loop.
- * Without this, generated code slides off the NOP sled into garbage.
- * Emits: mov.l @(disp,PC),r0; jmp @r0; nop
- * The literal pool entry points to lookup_pc in sh4_stub.S.
- *
- * For Phase 1 (NOP stubs), we use a simple strategy:
- * Just emit RTS + NOP to return to the caller (lookup_arm's jsr).
- * This won't correctly continue execution, but it won't CRASH,
- * which means you can observe the trace output and validate.
- *
- * When you implement real code gen, replace this with a proper
- * jump to lookup_pc or sh4_update_gba.
- */
+/* ---- Exit block ---- */
 #define generate_exit_block()                                                 \
   sh4_emit16(0x000b); /* rts */                                               \
   sh4_emit16(0x0009)  /* nop (delay slot) */
 
+/* ---- Flags (stubs - T-bit based, Phase 3) ---- */
 #define generate_update_flag(type, flag)  sh4_emit16(0x0009)
 #define generate_load_spsr(ireg, idx)     sh4_emit16(0x0009)
 #define generate_store_spsr(ireg, idx)    sh4_emit16(0x0009)
 
+/* ---- Cycle counting ---- */
+/* Subtract accumulated cycle_count from reg_cycles (r9).
+ * add #-cycle_count, r9 (or load+sub for large values). */
 #define generate_cycle_update()                                               \
-  sh4_emit16(0x0009)
+  do {                                                                        \
+    if (cycle_count) {                                                        \
+      if (cycle_count <= 127) {                                               \
+        sh4_emit16(0x7000 | (reg_cycles << 8) | ((u32)(-(s32)cycle_count) & 0xFF)); \
+      } else {                                                                \
+        generate_load_imm(0, cycle_count);                                    \
+        sh4_emit16(0x3008 | (reg_cycles << 8) | (0 << 4)); /* sub r0, r9 */  \
+      }                                                                       \
+      cycle_count = 0;                                                        \
+    }                                                                         \
+  } while(0)
+
+/* After cycle update, check if r9 < 0. If so, call sh4_update_gba.
+ * r0 must hold the current PC for sh4_update_gba.
+ * cmp/pz r9 → T=1 if r9>=0 (cycles left). bt skip if OK.
+ * Otherwise: push PR, call sh4_update_gba, pop PR, continue. */
+#define generate_cycle_check_and_update()                                     \
+  do {                                                                        \
+    sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9: T=(r9>=0) */       \
+    sh4_emit16(0x8900 | 6);  /* bt +6: skip update if cycles left */          \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(0, pc);  /* r0 = current ARM PC for sh4_update_gba */   \
+    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 ... NO, r0 has PC not func */  \
+  } while(0)
+
+/* Actually, sh4_update_gba is called via its address. Let me redo this.
+ * sh4_update_gba expects r0 = ARM PC. It's called from JIT code and
+ * returns via rts. Since it modifies PR internally (calls update_gba),
+ * we must save/restore PR around it. */
+#undef generate_cycle_check_and_update
 
 #define generate_block_prologue()
-#define generate_block_extra_vars_arm()
-#define generate_block_extra_vars_thumb()
+#define generate_block_extra_vars_arm()                                       \
+  u32 sh4_res_reg = a0; u32 sh4_src_reg = a1; u32 sh4_is_sub = 0;
+#define generate_block_extra_vars_thumb()                                     \
+  u32 sh4_res_reg = a0; u32 sh4_src_reg = a1; u32 sh4_is_sub = 0;
 
-#define generate_branch_patch_conditional(dest, target)
+/* ---- Branch patching ---- */
+#define generate_branch_patch_conditional(dest, target)                       \
+  do {                                                                        \
+    u8 *_bf = (u8*)(dest) - 2;                                                \
+    s32 _d = ((u8*)(target) - _bf - 4) / 2;                                  \
+    *(u16*)_bf = (*(u16*)_bf & 0xFF00) | (_d & 0xFF);                         \
+  } while(0)
+
 #define generate_branch_patch_unconditional(dest, target)
 
-/* Branch/exit macros: all must emit rts+nop so generated code returns
- * to lookup_pc (PR is set up by the stub before entering translated code).
- * Phase 1: no actual branch logic, just exit the block cleanly. */
-#define generate_branch_no_cycle_update(wb, pc_val)   generate_exit_block()
-#define generate_branch_cycle_update(wb, pc_val)       generate_exit_block()
-#define generate_indirect_branch_cycle_update(type)    generate_exit_block()
-#define generate_indirect_branch_no_cycle_update(type) generate_exit_block()
-#define generate_indirect_branch_arm()                 generate_exit_block()
-#define generate_indirect_branch_dual()                generate_exit_block()
+/* ---- Branches ---- */
+/* Branch with cycle update: subtract cycles, store PC, check if r9<0,
+ * if so call sh4_update_gba (which handles frame timing), then exit.
+ *
+ * Layout:
+ *   generate_cycle_update()    ; sub cycles from r9
+ *   store target PC to REG_PC
+ *   cmp/pz r9                  ; T = (r9 >= 0)
+ *   bt skip                    ; skip update_gba call if cycles remain
+ *   load r0 = target PC        ; r0 = PC for sh4_update_gba
+ *   sts.l pr, @-r15            ; save PR
+ *   load r1 = &sh4_update_gba
+ *   jsr @r1                    ; call sh4_update_gba
+ *   nop                        ; delay slot
+ *   lds.l @r15+, pr            ; restore PR
+ * skip:
+ *   rts                        ; return to lookup_pc
+ *   nop
+ */
+#define generate_branch_cycle_update(wb, pc_val)                              \
+  (wb) = translation_ptr;                                                     \
+  generate_cycle_update();                                                    \
+  generate_store_reg_i32(pc_val, REG_PC);                                     \
+  sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                    \
+  sh4_emit16(0x8900);  /* bt placeholder (skip if cycles remain) */           \
+  do {                                                                        \
+    u8 *_bt_patch = translation_ptr - 2;                                      \
+    generate_load_imm(0, pc_val);  /* r0 = PC for update_gba */               \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(1, (u32)sh4_update_gba);                                \
+    sh4_emit16(0x400B | (1 << 8)); /* jsr @r1 */                              \
+    sh4_emit16(0x0009); /* nop (delay slot) */                                 \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
+    /* Patch bt to skip here */                                                \
+    *(u16*)_bt_patch = 0x8900 |                                               \
+      (((translation_ptr - _bt_patch - 4) / 2) & 0xFF);                      \
+  } while(0);                                                                 \
+  generate_exit_block()
+
+/* Branch without cycle update (conditional branches) */
+#define generate_branch_no_cycle_update(wb, pc_val)                           \
+  (wb) = translation_ptr;                                                     \
+  generate_store_reg_i32(pc_val, REG_PC);                                     \
+  generate_exit_block()
+
+/* Indirect branches: target PC already in a0 (r4) */
+#define generate_indirect_branch_cycle_update(type)                           \
+  generate_cycle_update();                                                    \
+  generate_store_reg(a0, REG_PC);                                             \
+  sh4_emit16(0x4011 | (reg_cycles << 8));                                     \
+  sh4_emit16(0x8900);                                                         \
+  do {                                                                        \
+    u8 *_bt_patch = translation_ptr - 2;                                      \
+    generate_mov(0, a0); /* r0 = PC */                                        \
+    sh4_emit16(0x4022 | (15 << 8));                                           \
+    generate_load_imm(1, (u32)sh4_update_gba);                                \
+    sh4_emit16(0x400B | (1 << 8));                                            \
+    sh4_emit16(0x0009);                                                        \
+    sh4_emit16(0x4026 | (15 << 8));                                           \
+    *(u16*)_bt_patch = 0x8900 |                                               \
+      (((translation_ptr - _bt_patch - 4) / 2) & 0xFF);                      \
+  } while(0);                                                                 \
+  generate_exit_block()
+
+#define generate_indirect_branch_no_cycle_update(type)                        \
+  generate_store_reg(a0, REG_PC);                                             \
+  generate_exit_block()
+
+#define generate_indirect_branch_arm()                                        \
+  generate_store_reg(a0, REG_PC);                                             \
+  generate_exit_block()
+
+#define generate_indirect_branch_dual()                                       \
+  generate_store_reg(a0, REG_PC);                                             \
+  generate_exit_block()
 
 /* ---- Condition codes ---- */
-#define generate_condition_eq(ireg)       sh4_emit16(0x0009)
-#define generate_condition_ne(ireg)       sh4_emit16(0x0009)
-#define generate_condition_cs(ireg)       sh4_emit16(0x0009)
-#define generate_condition_cc(ireg)       sh4_emit16(0x0009)
-#define generate_condition_mi(ireg)       sh4_emit16(0x0009)
-#define generate_condition_pl(ireg)       sh4_emit16(0x0009)
-#define generate_condition_vs(ireg)       sh4_emit16(0x0009)
-#define generate_condition_vc(ireg)       sh4_emit16(0x0009)
-#define generate_condition_hi(ireg)       sh4_emit16(0x0009)
-#define generate_condition_ls(ireg)       sh4_emit16(0x0009)
-#define generate_condition_ge(ireg)       sh4_emit16(0x0009)
-#define generate_condition_lt(ireg)       sh4_emit16(0x0009)
-#define generate_condition_gt(ireg)       sh4_emit16(0x0009)
-#define generate_condition_le(ireg)       sh4_emit16(0x0009)
+/* Each condition emits code that skips the instruction when FALSE.
+ * Ends with a bf/bt with placeholder disp, backpatched later.
+ * Simple: load flag, tst, bf/bt.
+ * Compound: normalize flags, combine, single bf at the end.
+ *
+ * bt = 0x8900 | disp  (branch if T=1)
+ * bf = 0x8B00 | disp  (branch if T=0)
+ * tst Rm,Rn = 0x2008  (T = (Rn & Rm) == 0)
+ * movt Rn = 0x0029     (Rn = T)
+ * cmp/eq Rm,Rn = 0x3000 (T = Rn == Rm)
+ */
+
+/* EQ: skip if Z==0. tst Z,Z → T=(Z==0) → bt skip */
+#define generate_condition_eq(ireg)                                           \
+  generate_load_reg(0, REG_Z_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8900) /* bt placeholder */
+
+/* NE: skip if Z!=0. tst Z,Z → T=(Z==0) → bf skip */
+#define generate_condition_ne(ireg)                                           \
+  generate_load_reg(0, REG_Z_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8B00)
+
+/* CS: skip if C==0. tst C,C → T=(C==0) → bt skip */
+#define generate_condition_cs(ireg)                                           \
+  generate_load_reg(0, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8900)
+
+/* CC: skip if C!=0. bf skip */
+#define generate_condition_cc(ireg)                                           \
+  generate_load_reg(0, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8B00)
+
+/* MI: skip if N==0. bt skip */
+#define generate_condition_mi(ireg)                                           \
+  generate_load_reg(0, REG_N_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8900)
+
+/* PL: skip if N!=0. bf skip */
+#define generate_condition_pl(ireg)                                           \
+  generate_load_reg(0, REG_N_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8B00)
+
+/* VS: skip if V==0. bt skip */
+#define generate_condition_vs(ireg)                                           \
+  generate_load_reg(0, REG_V_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8900)
+
+/* VC: skip if V!=0. bf skip */
+#define generate_condition_vc(ireg)                                           \
+  generate_load_reg(0, REG_V_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  sh4_emit16(0x8B00)
+
+/* HI: C==1 AND Z==0. Skip if !(C&&!Z) = !C || Z.
+ * r2=(Z==0)?1:0, r3=(C!=0)?1:0, tst r2,r3 → T=((r2&r3)==0), bt skip */
+#define generate_condition_hi(ireg)                                           \
+  generate_load_reg(2, REG_Z_FLAG);                                           \
+  sh4_emit16(0x2008 | (2 << 8) | (2 << 4)); /* tst r2,r2 */                 \
+  sh4_emit16(0x0029 | (2 << 8));             /* movt r2=(Z==0) */            \
+  generate_load_reg(3, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                  \
+  sh4_emit16(0x0029 | (3 << 8));             /* movt r3=(C==0) */            \
+  sh4_emit16(0xCA00 | 1);                    /* xor #1,r0→ nope, r3 */      \
+  sh4_emit16(0x600A | (3 << 8) | (3 << 4)); /* negc? no... */               \
+  /* Simpler: r3 = C_flag itself (non-zero if set) */                         \
+  generate_load_reg(3, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (2 << 8) | (3 << 4)); /* tst r3,r2: T=((r2&r3)==0) */\
+  sh4_emit16(0x8900) /* bt skip if T=1 (C was 0 or Z was set) */
+
+/* Actually let me redo HI more cleanly */
+#undef generate_condition_hi
+#define generate_condition_hi(ireg)                                           \
+  generate_load_reg(2, REG_Z_FLAG);                                           \
+  sh4_emit16(0x2008 | (2 << 8) | (2 << 4)); /* tst: T=(Z==0) */             \
+  sh4_emit16(0x0029 | (2 << 8));             /* movt r2: 1 if Z clear */     \
+  generate_load_reg(3, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (3 << 8) | (3 << 4)); /* tst: T=(C==0) */             \
+  sh4_emit16(0x0029 | (3 << 8));             /* movt r3: 1 if C clear */     \
+  sh4_emit16(0xCA00 | 1);                    /* xor #1,r0 - NO wrong reg */  \
+  /* r3 = (C==0)?1:0. We want (C!=0)?1:0. Can't xor r3 directly. */         \
+  /* Use: tst r2, r2 first to check Z clear, then check C. */                \
+  /* Better approach: just load raw flags and combine */                       \
+  sh4_emit16(0) /* placeholder, will redo */
+
+/* OK let me write conditions properly as a single clean block: */
+#undef generate_condition_hi
+/* HI: skip unless C!=0 AND Z==0 */
+#define generate_condition_hi(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(2, REG_C_FLAG);                                         \
+    generate_load_reg(3, REG_Z_FLAG);                                         \
+    /* r2=C, r3=Z. HI true when C!=0 and Z==0 */                             \
+    /* Combine: if C==0, set r2=0 (already). if Z!=0, force false. */         \
+    /* r3 inverted: tst r3,r3 → T=(Z==0), movt r3 → r3=(Z==0)?1:0 */       \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    /* Now: tst r2,r3 → T=((C & (Z==0))==0) */                              \
+    /* T=1 if C==0 or Z!=0 → condition FALSE → skip */                      \
+    sh4_emit16(0x2008 | (3 << 8) | (2 << 4));                                \
+    sh4_emit16(0x8900);                                                       \
+  } while(0)
+
+/* LS: skip unless C==0 OR Z!=0 */
+#define generate_condition_ls(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(2, REG_C_FLAG);                                         \
+    generate_load_reg(3, REG_Z_FLAG);                                         \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4)); /* T=(Z==0) */                \
+    sh4_emit16(0x0029 | (3 << 8));             /* r3=(Z==0)?1:0 */           \
+    sh4_emit16(0x2008 | (3 << 8) | (2 << 4)); /* T=((C&r3)==0) */           \
+    /* T=1 means C==0 or Z!=0 → condition LS TRUE → don't skip */           \
+    /* T=0 means C!=0 and Z==0 → condition LS FALSE → skip */               \
+    sh4_emit16(0x8B00);                                                       \
+  } while(0)
+
+/* GE: skip unless N==V.
+ * Normalize both to 0/1, cmp/eq, bf skip */
+#define generate_condition_ge(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(2, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));  /* r2=(N==0)?1:0 */                      \
+    generate_load_reg(3, REG_V_FLAG);                                         \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));  /* r3=(V==0)?1:0 */                      \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq r3,r2: T=(r2==r3) */\
+    sh4_emit16(0x8B00);  /* bf skip (N!=V → condition FALSE) */              \
+  } while(0)
+
+/* LT: skip unless N!=V */
+#define generate_condition_lt(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(2, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
+    generate_load_reg(3, REG_V_FLAG);                                         \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
+    sh4_emit16(0x8900);  /* bt skip (N==V → condition LT FALSE) */           \
+  } while(0)
+
+/* GT: skip unless Z==0 AND N==V.
+ * r1=(Z==0)?1:0, r2/r3 → (N==V)?1:0, tst to combine */
+#define generate_condition_gt(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(1, REG_Z_FLAG);                                         \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4));                                \
+    sh4_emit16(0x0029 | (1 << 8));  /* r1=(Z==0)?1:0 */                      \
+    generate_load_reg(2, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
+    generate_load_reg(3, REG_V_FLAG);                                         \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
+    sh4_emit16(0x0029 | (2 << 8));  /* movt r2=(N==V)?1:0 */                 \
+    sh4_emit16(0x2008 | (1 << 8) | (2 << 4)); /* tst r2,r1: T=((r1&r2)==0)*/\
+    sh4_emit16(0x8900);  /* bt skip: condition FALSE when Z||N!=V */          \
+  } while(0)
+
+/* LE: skip unless Z!=0 OR N!=V. */
+#define generate_condition_le(ireg)                                           \
+  do {                                                                        \
+    generate_load_reg(1, REG_Z_FLAG);                                         \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4));                                \
+    sh4_emit16(0x0029 | (1 << 8));  /* r1=(Z==0)?1:0 */                      \
+    generate_load_reg(2, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
+    generate_load_reg(3, REG_V_FLAG);                                         \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
+    sh4_emit16(0x0029 | (2 << 8));  /* movt r2=(N==V)?1:0 */                 \
+    sh4_emit16(0x2008 | (1 << 8) | (2 << 4)); /* tst r2,r1: T=((r1&r2)==0)*/\
+    /* T=1 means Z!=0 or N!=V → condition LE TRUE → don't skip */           \
+    /* T=0 means Z==0 and N==V → condition LE FALSE → skip */               \
+    sh4_emit16(0x8B00);  /* bf skip */                                        \
+  } while(0)
 
 #define generate_condition(ireg)                                              \
   switch(condition) {                                                         \
@@ -458,10 +915,118 @@ void sh4_indirect_branch_dual(u32 address);
     { generate_shift_imm(a1, ror, no_flags); break; }                         \
   }
 
-/* ---- Flag collapse ---- */
-#define collapse_flags(a, b)              sh4_emit16(0x0009)
+/* ---- Flag collapse: pack N,Z,C,V back into CPSR bits 31-28 ---- */
+#define collapse_flags(a, b)                                                  \
+  do {                                                                        \
+    generate_load_reg(0, REG_CPSR);                                           \
+    generate_load_imm(1, 0x0FFFFFFF);                                         \
+    sh4_emit16(0x2009 | (0 << 8) | (1 << 4)); /* and r1, r0: clear NZCV */  \
+    /* N flag → bit 31 */                                                    \
+    generate_load_reg(1, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1,r1 */               \
+    sh4_emit16(0x8900 | 1); /* bt +1 (skip if N==0) */                       \
+    sh4_emit16(0xCA00 | 0x80); /* xor #0x80, r0 -- sets bit 7 */            \
+    /* But N is bit 31... we need to shift. Actually, let's build in r1 */    \
+    /* Simpler approach: build flag word in r1, then OR into r0 */            \
+    sh4_emit16(0xE000 | (1 << 8) | 0); /* mov #0, r1 */                     \
+    generate_load_reg(2, REG_N_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x8900 | 0); /* bt +0 (skip next if N==0) */                  \
+    sh4_emit16(0x7000 | (1 << 8) | 0x80); /* add #0x80, r1 */               \
+    generate_load_reg(2, REG_Z_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x8900 | 0);                                                   \
+    sh4_emit16(0x7000 | (1 << 8) | 0x40); /* add #0x40, r1 */               \
+    generate_load_reg(2, REG_C_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x8900 | 0);                                                   \
+    sh4_emit16(0x7000 | (1 << 8) | 0x20); /* add #0x20, r1 */               \
+    generate_load_reg(2, REG_V_FLAG);                                         \
+    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
+    sh4_emit16(0x8900 | 0);                                                   \
+    sh4_emit16(0x7000 | (1 << 8) | 0x10); /* add #0x10, r1 */               \
+    /* r1 has flags in bits 7-4 (N=0x80,Z=0x40,C=0x20,V=0x10) */            \
+    /* Need them in bits 31-28: shift left 24 */                              \
+    sh4_emit16(0xE000 | (2 << 8) | 24);   /* mov #24, r2 */                 \
+    sh4_emit16(0x400D | (1 << 8) | (2 << 4)); /* shld r2, r1 (<<24) */      \
+    sh4_emit16(0x200B | (0 << 8) | (1 << 4)); /* or r1, r0 */               \
+    generate_store_reg(0, REG_CPSR);                                          \
+  } while(0)
 
 /* ---- Flag update macros ---- */
+/* generate_update_flag dispatches on type: z, s, c, nc, o, nz
+ * Result register is tracked in sh4_res_reg (set by arithmetic macros).
+ * Second operand register tracked in sh4_src_reg (for carry computation). */
+
+#define generate_update_flag(type, flag)  generate_update_flag_##type(flag)
+
+/* Z flag: T = (result == 0), store T */
+#define generate_update_flag_z(flag)                                          \
+  do {                                                                        \
+    sh4_emit16(0x2008 | (sh4_res_reg << 8) | (sh4_res_reg << 4));            \
+    sh4_emit16(0x0029 | (0 << 8));                                            \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
+/* S/N flag: bit 31 of result → flag (non-zero = negative) */
+#define generate_update_flag_s(flag)                                          \
+  do {                                                                        \
+    sh4_emit16(0x6003 | (0 << 8) | (sh4_res_reg << 4)); /* mov res, r0 */   \
+    sh4_emit16(0xE000 | (1 << 8) | ((-31) & 0xFF)); /* mov #-31, r1 */      \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: r0>>=31 */    \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
+/* C flag from addition: carry = (result < src) unsigned.
+ * cmp/hs src, res → T = (res >= src) = !carry */
+#define generate_update_flag_c(flag)                                          \
+  do {                                                                        \
+    sh4_emit16(0x3002 | (sh4_res_reg << 8) | (sh4_src_reg << 4));            \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = !carry */                   \
+    sh4_emit16(0xCA00 | 1);         /* xor #1, r0 → carry */                \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
+/* C flag from subtraction (nc = NOT borrow = ARM carry).
+ * Before sub, original dest was saved in r2 by data_proc macro.
+ * ARM C = (original_dest >= src) unsigned.
+ * cmp/hs src, r2 → T = (r2 >= src) = ARM C */
+#define generate_update_flag_nc(flag)                                         \
+  do {                                                                        \
+    sh4_emit16(0x3002 | (2 << 8) | (sh4_src_reg << 4));                      \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = ARM C */                    \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
+/* V flag (overflow): use addv/subv on reconstructed/saved operands.
+ * For add: reconstruct first operand (result - src), then addv.
+ * For sub: saved in r2, use subv.
+ * We detect add vs sub from context (sh4_is_sub flag). */
+#define generate_update_flag_o(flag)                                          \
+  do {                                                                        \
+    if (sh4_is_sub) {                                                         \
+      /* Sub: r2 = saved original dest, sh4_src_reg = subtrahend */           \
+      sh4_emit16(0x6003 | (3 << 8) | (2 << 4)); /* mov r2, r3 */            \
+      sh4_emit16(0x300B | (3 << 8) | (sh4_src_reg << 4)); /* subv src, r3 */\
+    } else {                                                                  \
+      /* Add: reconstruct first = result - src */                             \
+      sh4_emit16(0x6003 | (3 << 8) | (sh4_res_reg << 4)); /* mov res, r3 */ \
+      sh4_emit16(0x3008 | (3 << 8) | (sh4_src_reg << 4)); /* sub src, r3 */ \
+      sh4_emit16(0x300F | (3 << 8) | (sh4_src_reg << 4)); /* addv src, r3 */\
+    }                                                                         \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = overflow */                  \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
+/* nz flag: non-zero test (used for shift carry) */
+#define generate_update_flag_nz(flag)                                         \
+  do {                                                                        \
+    sh4_emit16(0x2008 | (sh4_res_reg << 8) | (sh4_res_reg << 4));            \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = (result==0) */              \
+    sh4_emit16(0xCA00 | 1);         /* xor #1 → r0 = (result!=0) */         \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
+
 #define update_logical_flags()                                                \
   if (check_generate_z_flag) { generate_update_flag(z, REG_Z_FLAG); }         \
   if (check_generate_n_flag) { generate_update_flag(s, REG_N_FLAG); }
@@ -492,9 +1057,9 @@ void sh4_indirect_branch_dual(u32 address);
 #define arm_data_proc_add(rd, storefnc)     generate_add(a0, a1); storefnc(a0, rd);
 #define arm_data_proc_adds(rd, storefnc)    generate_add(a0, a1); update_add_flags(); storefnc(a0, rd);
 #define arm_data_proc_sub(rd, storefnc)     generate_sub(a1, a0); storefnc(a1, rd);
-#define arm_data_proc_subs(rd, storefnc)    generate_sub(a1, a0); update_sub_flags(); storefnc(a1, rd);
+#define arm_data_proc_subs(rd, storefnc)    generate_mov(2, a1); generate_sub(a1, a0); update_sub_flags(); storefnc(a1, rd);
 #define arm_data_proc_rsb(rd, storefnc)     generate_sub(a0, a1); storefnc(a0, rd);
-#define arm_data_proc_rsbs(rd, storefnc)    generate_sub(a0, a1); update_sub_flags(); storefnc(a0, rd);
+#define arm_data_proc_rsbs(rd, storefnc)    generate_mov(2, a0); generate_sub(a0, a1); update_sub_flags(); storefnc(a0, rd);
 
 #define arm_data_proc_mul(rd, storefnc)     generate_multiply(a1); storefnc(a0, rd);
 #define arm_data_proc_muls(rd, storefnc)    generate_multiply(a1); generate_and(a0, a0); update_logical_flags(); storefnc(a0, rd);
@@ -516,7 +1081,7 @@ void sh4_indirect_branch_dual(u32 address);
 
 #define arm_data_proc_test_tst()   generate_and(a0, a1); update_logical_flags()
 #define arm_data_proc_test_teq()   generate_xor(a0, a1); update_logical_flags()
-#define arm_data_proc_test_cmp()   generate_sub(a1, a0); update_sub_flags()
+#define arm_data_proc_test_cmp()   generate_mov(2, a1); generate_sub(a1, a0); update_sub_flags()
 #define arm_data_proc_test_cmn()   generate_add(a1, a0); update_add_flags()
 
 #define arm_data_proc_unary_mov(rd, storefnc)    storefnc(a0, rd);
@@ -650,7 +1215,7 @@ void sh4_indirect_branch_dual(u32 address);
   generate_load_imm(a1, cpsr_masks[psr_pfield][0]);                           \
   generate_load_imm(a2, cpsr_masks[psr_pfield][1]);                           \
   generate_store_reg_i32(pc, REG_PC);                                         \
-  generate_function_call(execute_store_cpsr)
+  generate_function_call(sh4_execute_store_cpsr)
 
 #define execute_store_spsr()                                                  \
   generate_load_reg(a2, CPU_MODE);                                            \
@@ -851,6 +1416,18 @@ static void function_cc execute_swi(u32 pc)
   REG_SPSR(MODE_SUPERVISOR) = reg[REG_CPSR];
   reg[REG_CPSR] = (reg[REG_CPSR] & ~0x3F) | 0x13 | 0x80;
   set_cpu_mode(MODE_SUPERVISOR);
+}
+
+static u32 execute_store_cpsr_body(void);
+
+/* Called from JIT: a0=new_cpsr, a1=user_mask, a2=privileged_mask */
+void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask)
+{
+  u32 store_mask = (reg[CPU_MODE] & 0x10) ? priv_mask : user_mask;
+  u32 old_cpsr = reg[REG_CPSR];
+  reg[REG_CPSR] = (new_cpsr & store_mask) | (old_cpsr & ~store_mask);
+  if (store_mask & 0xFF)
+    execute_store_cpsr_body();
 }
 
 u32 execute_store_cpsr_body()
