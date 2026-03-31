@@ -69,7 +69,7 @@ typedef struct
   u32 length_type;
   u32 start_type;
   u32 irq;
-} dma_transfer_type;
+} gba_dma_transfer_type;
 
 typedef enum
 {
@@ -242,7 +242,7 @@ extern u32 gamepak_size;
 extern char gamepak_code[5];
 extern char gamepak_filename[512];
 
-cpu_alert_type dma_transfer(unsigned dma_chan, int *cycles);
+cpu_alert_type gba_dma_transfer(unsigned dma_chan, int *cycles);
 u8 *memory_region(u32 address, u32 *memory_limit);
 u32 load_gamepak(const char *name,
                  int force_rtc, int force_rumble, int force_serial);
@@ -255,7 +255,7 @@ u8 *load_gamepak_page(u32 physical_index);
 
 extern u32 oam_update;
 extern u32 gbc_sound_wave_update;
-extern dma_transfer_type dma[DMA_CHAN_CNT];
+extern gba_dma_transfer_type dma[DMA_CHAN_CNT];
 
 extern u8 open_gba_bios_rom[1024*16];
 extern u16 palette_ram[512];

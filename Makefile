@@ -1,62 +1,68 @@
-# gpSP standalone SDL2 build
+# gpSP standalone SDL 1.2 build
+# PLATFORM: LINUX (default) or DC
+PLATFORM ?= LINUX
+
 DEBUG ?= 0
+HAVE_DYNAREC ?= 0
 OVERCLOCK_60FPS ?= 0
-HAVE_DYNAREC ?= 1
-FORCE_32BIT_ARCH ?= 1
 MMAP_JIT_CACHE ?= 0
 
-UNAME := $(shell uname -s)
-UNAME_M := $(shell uname -m)
-
-TARGET := gpsp
+TARGET   := gpsp
 BUILDDIR := obj
-
-CC  ?= gcc
-CXX ?= g++
-
 CORE_DIR := .
 
-# SDL 1.2
-SDL_CFLAGS  := $(shell sdl-config --cflags 2>/dev/null)
-SDL_LDFLAGS := $(shell sdl-config --libs 2>/dev/null)
+# Platform-specific setup
+ifeq ($(PLATFORM),DC)
+   include $(KOS_BASE)/Makefile.rules
+   CC       := kos-cc
+   CXX      := kos-cc
+   TARGET   := gpsp.elf
+   HAVE_DYNAREC := 0
+   CFLAGS   += -Os -ffast-math -DDREAMCAST
+   LDFLAGS  :=
+   LIBS     := -lm -lSDL
+else
+   CC       ?= gcc
+   CXX      ?= g++
+   FORCE_32BIT ?= 1
 
-INCFLAGS := -I$(CORE_DIR)
+   SDL_CFLAGS  := $(shell sdl-config --cflags 2>/dev/null)
+   SDL_LDFLAGS := $(shell sdl-config --libs 2>/dev/null)
+   LIBS     := $(SDL_LDFLAGS) -lm
 
-LDFLAGS := $(SDL_LDFLAGS) -lm
-
-# Platform detection
-ifeq ($(UNAME),Linux)
+   # Dynarec needs mmap JIT cache on Linux/Mac
    ifeq ($(HAVE_DYNAREC),1)
       MMAP_JIT_CACHE = 1
    endif
-else ifeq ($(UNAME),Darwin)
-   ifeq ($(HAVE_DYNAREC),1)
-      MMAP_JIT_CACHE = 1
-   endif
-endif
 
-# CPU architecture detection (must be before sources)
-ifeq ($(HAVE_DYNAREC),1)
-   ifeq ($(CPU_ARCH),)
-      ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
-         CPU_ARCH := x86_32
-         FORCE_32BIT_ARCH := 1
-      else ifneq (,$(filter i386 i686,$(UNAME_M)))
-         CPU_ARCH := x86_32
-      else ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
-         CPU_ARCH := arm64
-      else ifneq (,$(filter armv%,$(UNAME_M)))
-         CPU_ARCH := arm
-      else ifneq (,$(filter mips%,$(UNAME_M)))
-         CPU_ARCH := mips
+   # CPU architecture detection
+   ifeq ($(HAVE_DYNAREC),1)
+      UNAME_M := $(shell uname -m)
+      ifeq ($(CPU_ARCH),)
+         ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
+            CPU_ARCH := x86_32
+            FORCE_32BIT := 1
+         else ifneq (,$(filter i386 i686,$(UNAME_M)))
+            CPU_ARCH := x86_32
+         else ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
+            CPU_ARCH := arm64
+         else ifneq (,$(filter armv%,$(UNAME_M)))
+            CPU_ARCH := arm
+         else ifneq (,$(filter mips%,$(UNAME_M)))
+            CPU_ARCH := mips
+         endif
       endif
    endif
+
+   ifeq ($(FORCE_32BIT),1)
+      CFLAGS  += -m32
+      LDFLAGS += -m32
+   endif
+
+   CFLAGS += $(SDL_CFLAGS)
 endif
 
-FORCE_32BIT :=
-ifeq ($(FORCE_32BIT_ARCH),1)
-   FORCE_32BIT := -m32
-endif
+INCFLAGS := -I$(CORE_DIR)
 
 # Sources
 SOURCES_ASM := $(CORE_DIR)/bios_data.S
@@ -103,11 +109,9 @@ DEFINES := -DHAVE_STRINGS_H -DHAVE_STDINT_H -DHAVE_INTTYPES_H -DINLINE=inline -W
 ifeq ($(HAVE_DYNAREC), 1)
    DEFINES += -DHAVE_DYNAREC
 endif
-
 ifeq ($(MMAP_JIT_CACHE), 1)
    DEFINES += -DMMAP_JIT_CACHE
 endif
-
 ifeq ($(OVERCLOCK_60FPS), 1)
    DEFINES += -DOVERCLOCK_60FPS
 endif
@@ -132,16 +136,15 @@ OBJECTS := $(patsubst %.c,$(BUILDDIR)/%.o,$(SOURCES_C)) \
            $(patsubst %.S,$(BUILDDIR)/%.o,$(SOURCES_ASM)) \
            $(patsubst %.cc,$(BUILDDIR)/%.o,$(SOURCES_CC))
 
-CFLAGS   += $(FORCE_32BIT) $(DEFINES) $(OPTIMIZE) $(INCFLAGS) $(SDL_CFLAGS)
+CFLAGS   += $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
 CXXFLAGS  = $(CFLAGS) -fno-rtti -fno-exceptions -std=c++11
-LDFLAGS  += $(FORCE_32BIT)
 
 .PHONY: all clean
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CXX) -o $@ $^ $(LDFLAGS)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 $(BUILDDIR)/cpu_threaded.o: cpu_threaded.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -Wno-unused-variable -Wno-unused-label -c -o $@ $<

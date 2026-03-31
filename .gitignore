@@ -10,3 +10,5 @@ pandora/linux
 tools/generate_cc_lut
 assets/
 gpsp
+Makefile
+gpsp.elf

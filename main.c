@@ -174,7 +174,7 @@ u32 function_cc update_gba(int remaining_cycles)
           for (i = 0; i < 4; i++)
           {
             if(dma[i].start_type == DMA_START_HBLANK)
-              dma_transfer(i, &dma_cycles);
+              gba_dma_transfer(i, &dma_cycles);
           }
         }
 
@@ -206,7 +206,7 @@ u32 function_cc update_gba(int remaining_cycles)
           for (i = 0; i < 4; i++)
           {
             if(dma[i].start_type == DMA_START_VBLANK)
-              dma_transfer(i, &dma_cycles);
+              gba_dma_transfer(i, &dma_cycles);
           }
         }
         else if (vcount == 228)

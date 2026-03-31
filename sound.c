@@ -138,10 +138,10 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   if(((ds->fifo_top - ds->fifo_base) % 32) <= 16)
   {
     if(dma[1].direct_sound_channel == channel)
-      dma_transfer(1, &ret);
+      gba_dma_transfer(1, &ret);
 
     if(dma[2].direct_sound_channel == channel)
-      dma_transfer(2, &ret);
+      gba_dma_transfer(2, &ret);
   }
   return ret;
 }

@@ -343,7 +343,7 @@ u8 bios_rom[1024 * 16];
 u8 gamepak_backup[1024 * 128];
 
 u32 dma_bus_val;
-dma_transfer_type dma[4];
+gba_dma_transfer_type dma[4];
 
 // ROM memory is allocated in blocks of 1MB to better map the native block
 // mapping system. We will try to allocate 32 of them to allow loading
@@ -780,7 +780,7 @@ static cpu_alert_type trigger_dma(u32 dma_number, u32 value)
       if(start_type == DMA_START_IMMEDIATELY) {
         // Excutes the DMA now! Copies the data and returns side effects.
         int dma_cycles = 0;
-        cpu_alert_type ret = dma_transfer(dma_number, &dma_cycles);
+        cpu_alert_type ret = gba_dma_transfer(dma_number, &dma_cycles);
         if (!dma_cycles)
           return ret;
         // Sleep CPU for N cycles and return HALT as side effect (so it does).
@@ -1808,7 +1808,7 @@ const dma_region_type dma_region_map[17] =
                                                                               \
 cpu_alert_type dma_tf_loop##tfsize(                                           \
   u32 src_ptr, u32 dest_ptr, int src_strd, int dest_strd,                     \
-  bool wb, u32 length, dma_transfer_type *dma)                                \
+  bool wb, u32 length, gba_dma_transfer_type *dma)                                \
 {                                                                             \
   u32 i;                                                                      \
   u32 read_value = dma_bus_val;                                               \
@@ -2029,8 +2029,8 @@ dma_tf_loop_builder(32);
 
 static const int dma_stride[4] = {1, -1, 0, 1};
 
-static cpu_alert_type dma_transfer_copy(
-  dma_transfer_type *dmach, u32 src_ptr, u32 dest_ptr, u32 length)
+static cpu_alert_type gba_dma_transfer_copy(
+  gba_dma_transfer_type *dmach, u32 src_ptr, u32 dest_ptr, u32 length)
 {
   if (dmach->source_direction < 3)
   {
@@ -2047,9 +2047,9 @@ static cpu_alert_type dma_transfer_copy(
   return CPU_ALERT_NONE;
 }
 
-cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
+cpu_alert_type gba_dma_transfer(unsigned dma_chan, int *usedcycles)
 {
-  dma_transfer_type *dmach = &dma[dma_chan];
+  gba_dma_transfer_type *dmach = &dma[dma_chan];
   u32 src_ptr = 0x0FFFFFFF & dmach->source_address & (
                    dmach->length_type == DMA_16BIT ? ~1U : ~3U);
   u32 dst_ptr = 0x0FFFFFFF & dmach->dest_address & (
@@ -2069,15 +2069,15 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
   dma_region_type dst_reg1 = dma_region_map[dst_end >> 24];
 
   if (src_reg0 == src_reg1 && dst_reg0 == dst_reg1)
-    ret = dma_transfer_copy(dmach, src_ptr, dst_ptr, byte_length >> tfsizes);
+    ret = gba_dma_transfer_copy(dmach, src_ptr, dst_ptr, byte_length >> tfsizes);
   else if (src_reg0 == src_reg1) {
     // Source stays within the region, dest crosses over
     u32 blen0 = dma_stride[dmach->dest_direction] < 0 ?
         dst_ptr & 0xFFFFFF : 0x1000000 - (dst_ptr & 0xFFFFFF);
     u32 src1 = src_ptr + blen0 * dma_stride[dmach->source_direction];
     u32 dst1 = dst_ptr + blen0 * dma_stride[dmach->dest_direction];
-    ret  = dma_transfer_copy(dmach, src_ptr, dst_ptr, blen0 >> tfsizes);
-    ret |= dma_transfer_copy(dmach, src1, dst1, (byte_length - blen0) >> tfsizes);
+    ret  = gba_dma_transfer_copy(dmach, src_ptr, dst_ptr, blen0 >> tfsizes);
+    ret |= gba_dma_transfer_copy(dmach, src1, dst1, (byte_length - blen0) >> tfsizes);
   }
   else if (dst_reg0 == dst_reg1) {
     // Dest stays within the region, source crosses over
@@ -2085,8 +2085,8 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
         src_ptr & 0xFFFFFF : 0x1000000 - (src_ptr & 0xFFFFFF);
     u32 src1 = src_ptr + blen0 * dma_stride[dmach->source_direction];
     u32 dst1 = dst_ptr + blen0 * dma_stride[dmach->dest_direction];
-    ret  = dma_transfer_copy(dmach, src_ptr, dst_ptr, blen0 >> tfsizes);
-    ret |= dma_transfer_copy(dmach, src1, dst1, (byte_length - blen0) >> tfsizes);
+    ret  = gba_dma_transfer_copy(dmach, src_ptr, dst_ptr, blen0 >> tfsizes);
+    ret |= gba_dma_transfer_copy(dmach, src1, dst1, (byte_length - blen0) >> tfsizes);
   }
   // TODO: We do not cover the three-region case, seems no game uses that?
   // Lucky Luke does cross dest region due to some off-by-one error.

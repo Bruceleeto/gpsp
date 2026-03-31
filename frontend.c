@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <SDL.h>
+#include <SDL/SDL.h>
 
 #include "common.h"
 #include "gba_memory.h"
@@ -16,7 +16,8 @@
 /* Usually ~59.73 Hz */
 #define GBA_FPS (((float)GBC_BASE_RATE) / (308 * 228 * 4))
 
-#define WINDOW_SCALE 3
+#define SCREEN_WIDTH  640
+#define SCREEN_HEIGHT 480
 
 /* ---- Globals the core expects ---- */
 u32 skip_next_frame = 0;
@@ -50,11 +51,37 @@ void set_fastforward_override(bool fastforward)
 }
 
 /* ---- SDL state ---- */
-static SDL_Surface *screen    = NULL;
-static SDL_Surface *gba_surface = NULL;
+static SDL_Surface *screen = NULL;
 
 static int running = 1;
 static u32 sdl_key_state = 0;
+
+/* ---- Scale GBA framebuffer to screen ---- */
+static void scale_screen(u16 *src, SDL_Surface *dst)
+{
+   /* Nearest-neighbor scale 240x160 -> 640x480 (2.66x x 3x) */
+   u32 x_step = (GBA_SCREEN_WIDTH << 16) / SCREEN_WIDTH;
+   u32 y_step = (GBA_SCREEN_HEIGHT << 16) / SCREEN_HEIGHT;
+
+   SDL_LockSurface(dst);
+   u16 *dst_pixels = (u16 *)dst->pixels;
+   u32 dst_pitch = dst->pitch / 2;  /* pitch in pixels */
+
+   u32 sy = 0;
+   for (int y = 0; y < SCREEN_HEIGHT; y++)
+   {
+      u16 *src_row = &src[(sy >> 16) * GBA_SCREEN_PITCH];
+      u16 *dst_row = &dst_pixels[y * dst_pitch];
+      u32 sx = 0;
+      for (int x = 0; x < SCREEN_WIDTH; x++)
+      {
+         dst_row[x] = src_row[sx >> 16];
+         sx += x_step;
+      }
+      sy += y_step;
+   }
+   SDL_UnlockSurface(dst);
+}
 
 /* ---- SDL input callback for input.c's update_input() ---- */
 static int16_t sdl_input_state_cb(unsigned port, unsigned device,
@@ -141,7 +168,7 @@ static void sdl_poll_input(void)
 /* ---- Main ---- */
 int main(int argc, char *argv[])
 {
-   const char *rom_path  = (argc > 1) ? argv[1] : "assets/test.bin";
+   const char *rom_path  = (argc > 1) ? argv[1] : "pc/assets/test.bin";
    const char *bios_path = (argc > 2) ? argv[2] : NULL;
 
    /* ---- SDL init ---- */
@@ -152,11 +179,10 @@ int main(int argc, char *argv[])
    }
 
    SDL_WM_SetCaption("gpSP", NULL);
+   SDL_ShowCursor(0);
 
-   screen = SDL_SetVideoMode(
-      GBA_SCREEN_WIDTH * WINDOW_SCALE,
-      GBA_SCREEN_HEIGHT * WINDOW_SCALE,
-      16, SDL_SWSURFACE);
+   screen = SDL_SetVideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, 16,
+                             SDL_HWSURFACE | SDL_DOUBLEBUF);
    if (!screen)
    {
       fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError());
@@ -164,13 +190,8 @@ int main(int argc, char *argv[])
       return 1;
    }
 
-   /* Off-screen surface matching GBA framebuffer (RGB565) */
-   gba_surface = SDL_CreateRGBSurface(SDL_SWSURFACE,
-      GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, 16,
-      0xF800, 0x07E0, 0x001F, 0);
-
    /* ---- Audio ---- */
-   SDL_AudioSpec want, have;
+   SDL_AudioSpec want;
    memset(&want, 0, sizeof(want));
    want.freq     = GBA_SOUND_FREQUENCY;
    want.format   = AUDIO_S16SYS;
@@ -178,7 +199,7 @@ int main(int argc, char *argv[])
    want.samples  = 1024;
    want.callback = sdl_audio_callback;
 
-   if (SDL_OpenAudio(&want, &have) < 0)
+   if (SDL_OpenAudio(&want, NULL) < 0)
       fprintf(stderr, "SDL audio failed: %s\n", SDL_GetError());
 
    /* ---- Emulator init ---- */
@@ -252,11 +273,8 @@ int main(int argc, char *argv[])
    SDL_PauseAudio(0);
 
    /* ---- Main loop ---- */
-   Uint32 frame_ms    = (Uint32)(1000.0f / GBA_FPS);
-   Uint32 last_ticks  = SDL_GetTicks();
-   SDL_Rect dst_rect  = { 0, 0,
-      GBA_SCREEN_WIDTH * WINDOW_SCALE,
-      GBA_SCREEN_HEIGHT * WINDOW_SCALE };
+   Uint32 frame_ms   = (Uint32)(1000.0f / GBA_FPS);
+   Uint32 last_ticks = SDL_GetTicks();
 
    while (running)
    {
@@ -275,13 +293,8 @@ int main(int argc, char *argv[])
          execute_arm(execute_cycles);
       }
 
-      /* Present video: copy GBA pixels to surface, then scale-blit */
-      SDL_LockSurface(gba_surface);
-      memcpy(gba_surface->pixels, gba_screen_pixels,
-             GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * 2);
-      SDL_UnlockSurface(gba_surface);
-
-      SDL_SoftStretch(gba_surface, NULL, screen, &dst_rect);
+      /* Present video */
+      scale_screen(gba_screen_pixels, screen);
       SDL_Flip(screen);
 
       /* Frame pacing */
@@ -294,7 +307,6 @@ int main(int argc, char *argv[])
 
    /* ---- Cleanup ---- */
    SDL_CloseAudio();
-   SDL_FreeSurface(gba_surface);
    SDL_Quit();
 
    memory_term();
