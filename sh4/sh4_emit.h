@@ -409,8 +409,11 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_store_spsr(ireg, idx)    sh4_emit16(0x0009)
 
 /* ---- Cycle counting ---- */
-/* Subtract accumulated cycle_count from reg_cycles (r9).
- * add #-cycle_count, r9 (or load+sub for large values). */
+/* Subtract accumulated cycle_count from reg_cycles (r9), then check if
+ * cycles are exhausted (r9 < 0).  If so, store current ARM PC and call
+ * sh4_update_gba so the emulator can process video/timer/IRQ events.
+ * Without this check, tight polling loops (e.g. VSync wait) would spin
+ * forever because update_gba never gets a chance to advance time. */
 #define generate_cycle_update()                                               \
   do {                                                                        \
     if (cycle_count) {                                                        \
@@ -421,27 +424,22 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
         sh4_emit16(0x3008 | (reg_cycles << 8) | (0 << 4)); /* sub r0, r9 */  \
       }                                                                       \
       cycle_count = 0;                                                        \
+      /* Check exhaustion: if r9 >= 0 skip the update_gba call */             \
+      sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                \
+      sh4_emit16(0x8900); /* bt placeholder */                                \
+      do {                                                                    \
+        u8 *_cyc_patch = translation_ptr - 2;                                 \
+        generate_load_imm(0, pc); /* r0 = current ARM PC */                   \
+        sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                \
+        generate_load_imm(1, (u32)sh4_update_gba);                            \
+        sh4_emit16(0x400B | (1 << 8)); /* jsr @r1 */                         \
+        sh4_emit16(0x0009); /* nop (delay slot) */                            \
+        sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                \
+        *(u16*)_cyc_patch = 0x8900 |                                          \
+          (((translation_ptr - _cyc_patch - 4) / 2) & 0xFF);                 \
+      } while(0);                                                             \
     }                                                                         \
   } while(0)
-
-/* After cycle update, check if r9 < 0. If so, call sh4_update_gba.
- * r0 must hold the current PC for sh4_update_gba.
- * cmp/pz r9 → T=1 if r9>=0 (cycles left). bt skip if OK.
- * Otherwise: push PR, call sh4_update_gba, pop PR, continue. */
-#define generate_cycle_check_and_update()                                     \
-  do {                                                                        \
-    sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9: T=(r9>=0) */       \
-    sh4_emit16(0x8900 | 6);  /* bt +6: skip update if cycles left */          \
-    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
-    generate_load_imm(0, pc);  /* r0 = current ARM PC for sh4_update_gba */   \
-    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 ... NO, r0 has PC not func */  \
-  } while(0)
-
-/* Actually, sh4_update_gba is called via its address. Let me redo this.
- * sh4_update_gba expects r0 = ARM PC. It's called from JIT code and
- * returns via rts. Since it modifies PR internally (calls update_gba),
- * we must save/restore PR around it. */
-#undef generate_cycle_check_and_update
 
 #define generate_block_prologue()
 #define generate_block_extra_vars_arm()                                       \
@@ -508,6 +506,9 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* Indirect branches: target PC already in a0 (r4) */
 #define generate_indirect_branch_cycle_update(type)                           \
+  generate_indirect_branch_cycle_update_##type()
+
+#define generate_indirect_branch_cycle_update_arm()                           \
   generate_cycle_update();                                                    \
   generate_store_reg(a0, REG_PC);                                             \
   sh4_emit16(0x4011 | (reg_cycles << 8));                                     \
@@ -525,17 +526,26 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   } while(0);                                                                 \
   generate_exit_block()
 
+#define generate_indirect_branch_cycle_update_thumb()                         \
+  generate_indirect_branch_cycle_update_arm()
+
+#define generate_indirect_branch_cycle_update_dual()                          \
+  generate_cycle_update();                                                    \
+  generate_indirect_branch_dual()
+
 #define generate_indirect_branch_no_cycle_update(type)                        \
   generate_store_reg(a0, REG_PC);                                             \
   generate_exit_block()
 
 #define generate_indirect_branch_arm()                                        \
-  generate_store_reg(a0, REG_PC);                                             \
+  generate_store_reg(rv, REG_PC);                                             \
   generate_exit_block()
 
 #define generate_indirect_branch_dual()                                       \
-  generate_store_reg(a0, REG_PC);                                             \
-  generate_exit_block()
+  generate_mov(0, a0); /* r0 = target addr (stub expects r0) */               \
+  generate_load_imm(1, (u32)sh4_indirect_branch_dual);                        \
+  sh4_emit16(0x402B | (1 << 8)); /* jmp @r1 */                               \
+  sh4_emit16(0x0009) /* nop (delay slot) */
 
 /* ---- Condition codes ---- */
 /* Each condition emits code that skips the instruction when FALSE.
