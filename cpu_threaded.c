@@ -218,6 +218,8 @@ typedef struct
   #include "arm/arm_emit.h"
 #elif defined(ARM64_ARCH)
   #include "arm/arm64_emit.h"
+#elif defined(SH4_ARCH)
+  #include "sh4/sh4_emit.h"
 #else
   #include "x86/x86_emit.h"
 #endif
@@ -250,6 +252,19 @@ typedef struct
 #elif defined(MIPS_ARCH)
   void platform_cache_sync(void *baseaddr, void *endptr) {
     __builtin___clear_cache(baseaddr, endptr);
+  }
+#elif defined(SH4_ARCH)
+  void platform_cache_sync(void *baseaddr, void *endptr) {
+    /* SH4: flush dcache and invalidate icache */
+    unsigned addr;
+    for (addr = (unsigned)baseaddr & ~31; addr < (unsigned)endptr; addr += 32) {
+      __asm__ volatile("ocbwb @%0" :: "r"(addr));
+    }
+    /* Invalidate icache by writing to address array */
+    for (addr = (unsigned)baseaddr & ~31; addr < (unsigned)endptr; addr += 32) {
+      *(volatile unsigned *)(0xF0000000 | (addr & 0x1FE0)) =
+        (addr & 0xFFFFFC00);
+    }
   }
 #else
   /* x86 CPUs have icache consistency checks */

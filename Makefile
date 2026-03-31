@@ -1,9 +1,9 @@
 # gpSP standalone SDL 1.2 build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= LINUX
+PLATFORM ?= PC
 
 DEBUG ?= 0
-HAVE_DYNAREC ?= 0
+HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
 MMAP_JIT_CACHE ?= 0
 
@@ -17,8 +17,8 @@ ifeq ($(PLATFORM),DC)
    CC       := kos-cc
    CXX      := kos-cc
    TARGET   := gpsp.elf
-   HAVE_DYNAREC := 0
-   CFLAGS   += -Os -ffast-math -DDREAMCAST
+   CPU_ARCH := sh4
+   CFLAGS   += -Os -ffast-math -DDREAMCAST -DSMALL_TRANSLATION_CACHE
    LDFLAGS  :=
    LIBS     := -lm -lSDL
 else
@@ -94,6 +94,8 @@ ifeq ($(HAVE_DYNAREC), 1)
       SOURCES_ASM += $(CORE_DIR)/arm/arm64_stub.S
    else ifeq ($(CPU_ARCH), mips)
       SOURCES_ASM += $(CORE_DIR)/mips/mips_stub.S
+   else ifeq ($(CPU_ARCH), sh4)
+      SOURCES_ASM += $(CORE_DIR)/sh4/sh4_stub.S
    endif
 endif
 
@@ -124,6 +126,8 @@ else ifeq ($(CPU_ARCH), mips)
    DEFINES += -DMIPS_ARCH
 else ifeq ($(CPU_ARCH), x86_32)
    DEFINES += -DX86_ARCH
+else ifeq ($(CPU_ARCH), sh4)
+   DEFINES += -DSH4_ARCH
 endif
 
 GIT_VERSION := "$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)"
