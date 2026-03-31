@@ -55,19 +55,109 @@ void sh4_indirect_branch_dual(u32 address);
 #define check_generate_v_flag   (flag_status & 0x01)
 
 /* ==================================================================== */
-/* Low-level generate_* primitives (Phase 1: all NOPs)                  */
+/* Low-level generate_* primitives                                      */
 /* ==================================================================== */
 
-#define generate_load_reg(ireg, reg_index)       sh4_emit16(0x0009)
-#define generate_load_pc(ireg, new_pc)           sh4_emit16(0x0009)
-#define generate_load_imm(ireg, imm)             sh4_emit16(0x0009)
-#define generate_store_reg(ireg, reg_index)       sh4_emit16(0x0009)
-#define generate_store_reg_i32(imm, reg_index)   sh4_emit16(0x0009)
+/*
+ * SH4 encodings used (verified against sh4_opcodes.h):
+ *
+ *  mov #imm8, Rn           0xE000 | Rn<<8 | imm&0xFF       sign-ext to 32b
+ *  mov Rm, Rn              0x6003 | Rn<<8 | Rm<<4
+ *  not Rm, Rn              0x6007 | Rn<<8 | Rm<<4
+ *  mov.l @(disp4,Rm), Rn   0x5000 | Rn<<8 | Rm<<4 | disp   EA = Rm + disp*4
+ *  mov.l Rm, @(disp4,Rn)   0x1000 | Rn<<8 | Rm<<4 | disp   EA = Rn + disp*4
+ *  mov.l @(R0,Rm), Rn      0x000E | Rn<<8 | Rm<<4           EA = R0 + Rm
+ *  mov.l Rm, @(R0,Rn)      0x0006 | Rn<<8 | Rm<<4           EA = R0 + Rn
+ *  mov.l @(disp8,PC), Rn   0xD000 | Rn<<8 | disp            EA = (PC+4)&~3 + disp*4
+ *  mov.l Rm, @Rn           0x2002 | Rn<<8 | Rm<<4
+ *  add #imm8, Rn           0x7000 | Rn<<8 | imm&0xFF
+ *  bra disp12              0xA000 | disp&0xFFF               PC+4 + disp*2
+ */
 
-#define generate_load_reg_pc(ireg, reg_index, pc_off)  sh4_emit16(0x0009)
+/* Load reg[reg_index] into SH4 register ireg.
+ * ARM regs 0-15: single mov.l @(disp, r8), ireg
+ * Extended regs >15: mov #offset, r0; mov.l @(r0, r8), ireg */
+#define generate_load_reg(ireg, reg_index)                                    \
+  do {                                                                        \
+    if ((u32)(reg_index) <= 15) {                                             \
+      sh4_emit16(0x5000 | ((ireg) << 8) | (reg_base << 4) | (reg_index));    \
+    } else {                                                                  \
+      sh4_emit16(0xE000 | ((u32)((reg_index) * 4) & 0xFF));                  \
+      sh4_emit16(0x000E | ((ireg) << 8) | (reg_base << 4));                  \
+    }                                                                         \
+  } while(0)
 
-#define generate_mov(dest, src)           sh4_emit16(0x0009)
-#define generate_not(ireg)                sh4_emit16(0x0009)
+/* Store SH4 register ireg into reg[reg_index].
+ * ARM regs 0-15: single mov.l ireg, @(disp, r8)
+ * Extended >15, ireg!=r0: mov #offset, r0; mov.l ireg, @(r0, r8)
+ * Extended >15, ireg==r0: mov r8,r1; add #offset,r1; mov.l r0,@r1 */
+#define generate_store_reg(ireg, reg_index)                                   \
+  do {                                                                        \
+    if ((u32)(reg_index) <= 15) {                                             \
+      sh4_emit16(0x1000 | (reg_base << 8) | ((ireg) << 4) | (reg_index));    \
+    } else if ((ireg) != 0) {                                                 \
+      sh4_emit16(0xE000 | ((u32)((reg_index) * 4) & 0xFF));                  \
+      sh4_emit16(0x0006 | (reg_base << 8) | ((ireg) << 4));                  \
+    } else {                                                                  \
+      sh4_emit16(0x6003 | (1 << 8) | (reg_base << 4));                       \
+      sh4_emit16(0x7000 | (1 << 8) | ((u32)((reg_index) * 4) & 0xFF));      \
+      sh4_emit16(0x2002 | (1 << 8) | (0 << 4));                              \
+    }                                                                         \
+  } while(0)
+
+/* Load immediate into ireg.
+ * Small (-128..127): mov #imm8, ireg
+ * Large: inline constant with branch-over:
+ *   mov.l @(d,PC), ireg; bra skip; nop; [pad]; .long val; skip: */
+#define generate_load_imm(ireg, imm)                                          \
+  do {                                                                        \
+    u32 _li_v = (u32)(imm);                                                   \
+    if ((s32)_li_v >= -128 && (s32)_li_v <= 127) {                            \
+      sh4_emit16(0xE000 | ((ireg) << 8) | (_li_v & 0xFF));                   \
+    } else {                                                                  \
+      u8 *_li_s = translation_ptr;                                            \
+      sh4_emit16(0);      /* placeholder: mov.l @(d,PC), ireg */              \
+      sh4_emit16(0);      /* placeholder: bra skip */                         \
+      sh4_emit16(0x0009); /* nop (delay slot) */                              \
+      if ((uintptr_t)translation_ptr & 2)                                     \
+        sh4_emit16(0x0009); /* pad to 4-byte align */                         \
+      u8 *_li_c = translation_ptr;                                            \
+      *(u32 *)translation_ptr = _li_v;                                        \
+      translation_ptr += 4;                                                   \
+      *(u16 *)_li_s = 0xD000 | ((ireg) << 8) |                               \
+        (u32)((_li_c - (u8*)(((uintptr_t)_li_s + 4) & ~(uintptr_t)3)) >> 2);\
+      *(u16 *)(_li_s + 2) = 0xA000 |                                         \
+        ((u32)((translation_ptr - (_li_s + 2) - 4) >> 1) & 0xFFF);           \
+    }                                                                         \
+  } while(0)
+
+/* Load PC constant (known at translation time) */
+#define generate_load_pc(ireg, new_pc)                                        \
+  generate_load_imm(ireg, new_pc)
+
+/* Load reg or PC+offset: if reg_index==15 load pc+pc_off, else load reg */
+#define generate_load_reg_pc(ireg, reg_index, pc_off)                         \
+  do {                                                                        \
+    if ((reg_index) == 15)                                                    \
+      generate_load_imm(ireg, (pc + (pc_off)));                               \
+    else                                                                      \
+      generate_load_reg(ireg, reg_index);                                     \
+  } while(0)
+
+/* Store immediate value to reg[reg_index]. Uses r0 as scratch. */
+#define generate_store_reg_i32(imm, reg_index)                                \
+  do {                                                                        \
+    generate_load_imm(0, imm);                                                \
+    generate_store_reg(0, reg_index);                                         \
+  } while(0)
+
+/* Register-to-register move: mov Rm, Rn */
+#define generate_mov(dest, src)                                               \
+  sh4_emit16(0x6003 | ((dest) << 8) | ((src) << 4))
+
+/* Bitwise NOT in place: not Rm, Rn (same register) */
+#define generate_not(ireg)                                                    \
+  sh4_emit16(0x6007 | ((ireg) << 8) | ((ireg) << 4))
 
 #define generate_add(dest, src)           sh4_emit16(0x0009)
 #define generate_add_imm(ireg, imm)       sh4_emit16(0x0009)
