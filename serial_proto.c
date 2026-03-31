@@ -132,7 +132,7 @@ static void serialpoke_senddata(u16 state, const u16 *packet) {
   if (packet)
     pack16(&pkt[2], packet, 8);
 
-  netpacket_send(RETRO_NETPACKET_BROADCAST, pkt, sizeof(pkt));
+  netpacket_send(NETPACKET_BROADCAST, pkt, sizeof(pkt));
 }
 
 // Called when serial master schedules a serial transfer.
@@ -423,7 +423,7 @@ static void serialaw_senddata(u16 cmd, u8 state, const u16 *packet, size_t wcnt)
   };
   pack16(&pkt[2], packet, wcnt);
 
-  netpacket_send(RETRO_NETPACKET_BROADCAST, pkt, 8 + wcnt * 2);
+  netpacket_send(NETPACKET_BROADCAST, pkt, 8 + wcnt * 2);
 }
 
 static bool empty_awpeers() {

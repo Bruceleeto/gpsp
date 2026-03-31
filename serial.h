@@ -25,6 +25,8 @@
 #define SERIAL_MODE_SERIAL_AW2    5  // Connected to serial cable (AdvWars emulation mode)
 #define SERIAL_MODE_AUTO          6  // Choose best fit automatically
 
+#define NETPACKET_BROADCAST       0xFFFF
+
 extern int serial_mode;
 
 // Register writes
