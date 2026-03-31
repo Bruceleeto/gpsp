@@ -12,6 +12,7 @@
 #include "common.h"
 #include "gba_memory.h"
 #include "gba_cc_lut.h"
+#include "memmap.h"
 
 /* Usually ~59.73 Hz */
 #define GBA_FPS (((float)GBC_BASE_RATE) / (308 * 228 * 4))
@@ -21,7 +22,11 @@
 /* ---- Globals the core expects (normally in libretro.c) ---- */
 u32 skip_next_frame = 0;
 u32 num_skipped_frames = 0;
+#ifdef HAVE_DYNAREC
+int dynarec_enable = 1;
+#else
 int dynarec_enable = 0;
+#endif
 boot_mode selected_boot_mode = boot_game;
 int sprite_limit = 1;
 
@@ -186,6 +191,12 @@ int main(int argc, char *argv[])
       fprintf(stderr, "SDL audio failed: %s\n", SDL_GetError());
 
    /* ---- Emulator init ---- */
+#if defined(HAVE_DYNAREC) && defined(MMAP_JIT_CACHE)
+   rom_translation_cache = map_jit_block(ROM_TRANSLATION_CACHE_SIZE +
+                                         RAM_TRANSLATION_CACHE_SIZE);
+   ram_translation_cache = &rom_translation_cache[ROM_TRANSLATION_CACHE_SIZE];
+#endif
+
    init_gamepak_buffer();
    init_sound();
 

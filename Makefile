@@ -1,7 +1,7 @@
 # gpSP standalone SDL2 build
 DEBUG ?= 0
 OVERCLOCK_60FPS ?= 0
-HAVE_DYNAREC ?= 0
+HAVE_DYNAREC ?= 1
 FORCE_32BIT_ARCH ?= 1
 MMAP_JIT_CACHE ?= 0
 
@@ -23,6 +23,40 @@ SDL_LDFLAGS := $(shell sdl2-config --libs 2>/dev/null)
 INCFLAGS := -I$(CORE_DIR)
 
 LDFLAGS := $(SDL_LDFLAGS) -lm
+
+# Platform detection
+ifeq ($(UNAME),Linux)
+   ifeq ($(HAVE_DYNAREC),1)
+      MMAP_JIT_CACHE = 1
+   endif
+else ifeq ($(UNAME),Darwin)
+   ifeq ($(HAVE_DYNAREC),1)
+      MMAP_JIT_CACHE = 1
+   endif
+endif
+
+# CPU architecture detection (must be before sources)
+ifeq ($(HAVE_DYNAREC),1)
+   ifeq ($(CPU_ARCH),)
+      ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
+         CPU_ARCH := x86_32
+         FORCE_32BIT_ARCH := 1
+      else ifneq (,$(filter i386 i686,$(UNAME_M)))
+         CPU_ARCH := x86_32
+      else ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
+         CPU_ARCH := arm64
+      else ifneq (,$(filter armv%,$(UNAME_M)))
+         CPU_ARCH := arm
+      else ifneq (,$(filter mips%,$(UNAME_M)))
+         CPU_ARCH := mips
+      endif
+   endif
+endif
+
+FORCE_32BIT :=
+ifeq ($(FORCE_32BIT_ARCH),1)
+   FORCE_32BIT := -m32
+endif
 
 # Sources
 SOURCES_ASM := $(CORE_DIR)/bios_data.S
@@ -55,40 +89,6 @@ ifeq ($(HAVE_DYNAREC), 1)
    else ifeq ($(CPU_ARCH), mips)
       SOURCES_ASM += $(CORE_DIR)/mips/mips_stub.S
    endif
-endif
-
-# Platform detection
-ifeq ($(UNAME),Linux)
-   ifeq ($(HAVE_DYNAREC),1)
-      MMAP_JIT_CACHE = 1
-   endif
-else ifeq ($(UNAME),Darwin)
-   ifeq ($(HAVE_DYNAREC),1)
-      MMAP_JIT_CACHE = 1
-   endif
-endif
-
-# CPU architecture detection (for dynarec)
-ifeq ($(HAVE_DYNAREC),1)
-   ifeq ($(CPU_ARCH),)
-      ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
-         CPU_ARCH := x86_32
-         FORCE_32BIT_ARCH := 1
-      else ifneq (,$(filter i386 i686,$(UNAME_M)))
-         CPU_ARCH := x86_32
-      else ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
-         CPU_ARCH := arm64
-      else ifneq (,$(filter armv%,$(UNAME_M)))
-         CPU_ARCH := arm
-      else ifneq (,$(filter mips%,$(UNAME_M)))
-         CPU_ARCH := mips
-      endif
-   endif
-endif
-
-FORCE_32BIT :=
-ifeq ($(FORCE_32BIT_ARCH),1)
-   FORCE_32BIT := -m32
 endif
 
 # Optimization
