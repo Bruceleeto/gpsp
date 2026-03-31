@@ -22,6 +22,15 @@
 // - block memory needs psr swapping and user mode reg swapping
 
 #include "common.h"
+#if defined(SH4_ARCH)
+#include "sh4/sh4_validate.h"
+#else
+/* SH4 debug macros - no-op on other platforms */
+#define debug_block_start(a,b,c,d)
+#define debug_block_done(a,b,c,d)
+#define debug_hexdump_block(a,b)
+#define debug_null_guard(a,b)
+#endif
 #if defined(VITA)
 #include <psp2/kernel/sysmem.h>
 #include <stdio.h>
@@ -2660,11 +2669,18 @@ u8 function_cc *block_lookup_address_dual(u32 pc)
 u8 function_cc *block_lookup_address_arm(u32 pc)
 {
   unsigned i;
+#ifdef SH4_ARCH
+  /* Mask BIOS mirrors to canonical range (stub also does this at runtime) */
+  if (pc < 0x02000000 && pc >= 0x00004000)
+    pc &= 0x3FFF;
+#endif
+#ifdef SH4_DYNAREC_DEBUG
+  sh4_validate_regs(pc);
+#endif
   for (i = 0; i < 4; i++) {
     u8 *ret = block_lookup_translate_arm(pc);
-    if (ret) {
+    if (ret && ret != (u8*)(~0)) {
       translate_icache_sync();
-      debug_lookup("ARM", pc, ret);
       return ret;
     }
   }
@@ -2678,11 +2694,14 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
 u8 function_cc *block_lookup_address_thumb(u32 pc)
 {
   unsigned i;
+#ifdef SH4_ARCH
+  if (pc < 0x02000000 && pc >= 0x00004000)
+    pc &= 0x3FFF;
+#endif
   for (i = 0; i < 4; i++) {
     u8 *ret = block_lookup_translate_thumb(pc);
-    if (ret) {
+    if (ret && ret != (u8*)(~0)) {
       translate_icache_sync();
-      debug_lookup("THUMB", pc, ret);
       return ret;
     }
   }
@@ -3177,6 +3196,10 @@ bool translate_block_arm(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
+  /* SH4: generate_branch_patch_unconditional is a no-op (can't easily do
+   * relative branches with SH4's limited displacement), so skip the cascade.
+   * External exits resolve lazily at runtime via lookup_pc. */
+#ifndef SH4_ARCH
   for(i = 0; i < external_block_exit_position; i++)
   {
     branch_target = external_block_exits[i].branch_target;
@@ -3189,6 +3212,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+#endif
   return true;
 }
 
@@ -3341,6 +3365,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
+#ifndef SH4_ARCH
   for(i = 0; i < external_block_exit_position; i++)
   {
     branch_target = external_block_exits[i].branch_target;
@@ -3353,6 +3378,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+#endif
   return true;
 }
 

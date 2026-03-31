@@ -5,7 +5,7 @@ PLATFORM ?= DC
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
 MMAP_JIT_CACHE ?= 0
-SH4_DEBUG ?= 1
+SH4_DEBUG ?= 0
 
 TARGET   := gpsp
 BUILDDIR := obj
@@ -18,7 +18,7 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   += -O1 -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
+   CFLAGS   +=  -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
    LIBS     := -lm -lSDL
 else

@@ -22,8 +22,8 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* ---- SH4 instruction emission ---- */
 #define sh4_emit16(value)                                                     \
-  *((u16 *)translation_ptr) = (u16)(value);                                   \
-  translation_ptr += 2
+  do { *((u16 *)translation_ptr) = (u16)(value);                              \
+       translation_ptr += 2; } while(0)
 
 /* ---- Register mapping ---- */
 #define reg_base    8    /* r8: callee-saved, pointer to reg[] */
@@ -127,7 +127,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
       *(u16 *)_li_s = 0xD000 | ((ireg) << 8) |                               \
         (u32)((_li_c - (u8*)(((uintptr_t)_li_s + 4) & ~(uintptr_t)3)) >> 2);\
       *(u16 *)(_li_s + 2) = 0xA000 |                                         \
-        ((u32)((translation_ptr - (_li_s + 2) - 4) >> 1) & 0xFFF);           \
+        ((u32)((translation_ptr - (_li_s + 2) - 4) >> 1) & 0xFFF);                                                                       \
     }                                                                         \
   } while(0)
 
@@ -382,13 +382,19 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* ---- Function calls ---- */
 /* Save PR (clobbered by jsr), call func, restore PR.
+ * Also save/restore r8 (reg_base) and r9 (reg_cycles) since C functions
+ * might clobber them despite ABI saying they're callee-saved.
  * Args are already in r4-r6 (a0-a2), return in r0. */
 #define generate_function_call(func)                                          \
   do {                                                                        \
     sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 (push PR) */          \
+    sh4_emit16(0x2F86);              /* mov.l r8, @-r15 (push r8) */          \
+    sh4_emit16(0x2F96);              /* mov.l r9, @-r15 (push r9) */          \
     generate_load_imm(0, (u32)(func));                                        \
     sh4_emit16(0x400B | (0 << 8));  /* jsr @r0 */                             \
     sh4_emit16(0x0009);              /* nop (delay slot) */                    \
+    sh4_emit16(0x69F6);              /* mov.l @r15+, r9 (pop r9) */           \
+    sh4_emit16(0x68F6);              /* mov.l @r15+, r8 (pop r8) */           \
     sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr (pop PR) */           \
   } while(0)
 
@@ -444,9 +450,11 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   u32 sh4_res_reg = a0; u32 sh4_src_reg = a1; u32 sh4_is_sub = 0;
 
 /* ---- Branch patching ---- */
+/* backpatch_address points to the bt/bf instruction itself.
+ * Patch the 8-bit displacement: target = PC+4+disp*2 where PC=bt_addr */
 #define generate_branch_patch_conditional(dest, target)                       \
   do {                                                                        \
-    u8 *_bf = (u8*)(dest) - 2;                                                \
+    u8 *_bf = (u8*)(dest);                                                    \
     s32 _d = ((u8*)(target) - _bf - 4) / 2;                                  \
     *(u16*)_bf = (*(u16*)_bf & 0xFF00) | (_d & 0xFF);                         \
   } while(0)
@@ -542,101 +550,75 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
  * cmp/eq Rm,Rn = 0x3000 (T = Rn == Rm)
  */
 
+/* All conditions must set backpatch_address before the bt/bf.
+ * generate_branch_patch_conditional later patches at backpatch_address. */
+
 /* EQ: skip if Z==0. tst Z,Z → T=(Z==0) → bt skip */
 #define generate_condition_eq(ireg)                                           \
   generate_load_reg(0, REG_Z_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
-  sh4_emit16(0x8900) /* bt placeholder */
+  backpatch_address = translation_ptr;                                        \
+  sh4_emit16(0x8900)
 
 /* NE: skip if Z!=0. tst Z,Z → T=(Z==0) → bf skip */
 #define generate_condition_ne(ireg)                                           \
   generate_load_reg(0, REG_Z_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8B00)
 
 /* CS: skip if C==0. tst C,C → T=(C==0) → bt skip */
 #define generate_condition_cs(ireg)                                           \
   generate_load_reg(0, REG_C_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8900)
 
 /* CC: skip if C!=0. bf skip */
 #define generate_condition_cc(ireg)                                           \
   generate_load_reg(0, REG_C_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8B00)
 
 /* MI: skip if N==0. bt skip */
 #define generate_condition_mi(ireg)                                           \
   generate_load_reg(0, REG_N_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8900)
 
 /* PL: skip if N!=0. bf skip */
 #define generate_condition_pl(ireg)                                           \
   generate_load_reg(0, REG_N_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8B00)
 
 /* VS: skip if V==0. bt skip */
 #define generate_condition_vs(ireg)                                           \
   generate_load_reg(0, REG_V_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8900)
 
 /* VC: skip if V!=0. bf skip */
 #define generate_condition_vc(ireg)                                           \
   generate_load_reg(0, REG_V_FLAG);                                           \
   sh4_emit16(0x2008 | (0 << 8) | (0 << 4));                                  \
+  backpatch_address = translation_ptr;                                        \
   sh4_emit16(0x8B00)
 
-/* HI: C==1 AND Z==0. Skip if !(C&&!Z) = !C || Z.
- * r2=(Z==0)?1:0, r3=(C!=0)?1:0, tst r2,r3 → T=((r2&r3)==0), bt skip */
-#define generate_condition_hi(ireg)                                           \
-  generate_load_reg(2, REG_Z_FLAG);                                           \
-  sh4_emit16(0x2008 | (2 << 8) | (2 << 4)); /* tst r2,r2 */                 \
-  sh4_emit16(0x0029 | (2 << 8));             /* movt r2=(Z==0) */            \
-  generate_load_reg(3, REG_C_FLAG);                                           \
-  sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                  \
-  sh4_emit16(0x0029 | (3 << 8));             /* movt r3=(C==0) */            \
-  sh4_emit16(0xCA00 | 1);                    /* xor #1,r0→ nope, r3 */      \
-  sh4_emit16(0x600A | (3 << 8) | (3 << 4)); /* negc? no... */               \
-  /* Simpler: r3 = C_flag itself (non-zero if set) */                         \
-  generate_load_reg(3, REG_C_FLAG);                                           \
-  sh4_emit16(0x2008 | (2 << 8) | (3 << 4)); /* tst r3,r2: T=((r2&r3)==0) */\
-  sh4_emit16(0x8900) /* bt skip if T=1 (C was 0 or Z was set) */
-
-/* Actually let me redo HI more cleanly */
-#undef generate_condition_hi
-#define generate_condition_hi(ireg)                                           \
-  generate_load_reg(2, REG_Z_FLAG);                                           \
-  sh4_emit16(0x2008 | (2 << 8) | (2 << 4)); /* tst: T=(Z==0) */             \
-  sh4_emit16(0x0029 | (2 << 8));             /* movt r2: 1 if Z clear */     \
-  generate_load_reg(3, REG_C_FLAG);                                           \
-  sh4_emit16(0x2008 | (3 << 8) | (3 << 4)); /* tst: T=(C==0) */             \
-  sh4_emit16(0x0029 | (3 << 8));             /* movt r3: 1 if C clear */     \
-  sh4_emit16(0xCA00 | 1);                    /* xor #1,r0 - NO wrong reg */  \
-  /* r3 = (C==0)?1:0. We want (C!=0)?1:0. Can't xor r3 directly. */         \
-  /* Use: tst r2, r2 first to check Z clear, then check C. */                \
-  /* Better approach: just load raw flags and combine */                       \
-  sh4_emit16(0) /* placeholder, will redo */
-
-/* OK let me write conditions properly as a single clean block: */
-#undef generate_condition_hi
 /* HI: skip unless C!=0 AND Z==0 */
 #define generate_condition_hi(ireg)                                           \
   do {                                                                        \
     generate_load_reg(2, REG_C_FLAG);                                         \
     generate_load_reg(3, REG_Z_FLAG);                                         \
-    /* r2=C, r3=Z. HI true when C!=0 and Z==0 */                             \
-    /* Combine: if C==0, set r2=0 (already). if Z!=0, force false. */         \
-    /* r3 inverted: tst r3,r3 → T=(Z==0), movt r3 → r3=(Z==0)?1:0 */       \
-    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
-    sh4_emit16(0x0029 | (3 << 8));                                            \
-    /* Now: tst r2,r3 → T=((C & (Z==0))==0) */                              \
-    /* T=1 if C==0 or Z!=0 → condition FALSE → skip */                      \
-    sh4_emit16(0x2008 | (3 << 8) | (2 << 4));                                \
-    sh4_emit16(0x8900);                                                       \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4)); /* tst: T=(Z==0) */           \
+    sh4_emit16(0x0029 | (3 << 8));             /* movt r3=(Z==0)?1:0 */      \
+    sh4_emit16(0x2008 | (3 << 8) | (2 << 4)); /* tst r2,r3: T=((C&r3)==0) */\
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8900); /* bt skip (C==0 or Z!=0) */                          \
   } while(0)
 
 /* LS: skip unless C==0 OR Z!=0 */
@@ -644,26 +626,25 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   do {                                                                        \
     generate_load_reg(2, REG_C_FLAG);                                         \
     generate_load_reg(3, REG_Z_FLAG);                                         \
-    sh4_emit16(0x2008 | (3 << 8) | (3 << 4)); /* T=(Z==0) */                \
-    sh4_emit16(0x0029 | (3 << 8));             /* r3=(Z==0)?1:0 */           \
-    sh4_emit16(0x2008 | (3 << 8) | (2 << 4)); /* T=((C&r3)==0) */           \
-    /* T=1 means C==0 or Z!=0 → condition LS TRUE → don't skip */           \
-    /* T=0 means C!=0 and Z==0 → condition LS FALSE → skip */               \
-    sh4_emit16(0x8B00);                                                       \
+    sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    sh4_emit16(0x2008 | (3 << 8) | (2 << 4));                                \
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8B00); /* bf skip (C!=0 and Z==0) */                         \
   } while(0)
 
-/* GE: skip unless N==V.
- * Normalize both to 0/1, cmp/eq, bf skip */
+/* GE: skip unless N==V */
 #define generate_condition_ge(ireg)                                           \
   do {                                                                        \
     generate_load_reg(2, REG_N_FLAG);                                         \
     sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
-    sh4_emit16(0x0029 | (2 << 8));  /* r2=(N==0)?1:0 */                      \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
     generate_load_reg(3, REG_V_FLAG);                                         \
     sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
-    sh4_emit16(0x0029 | (3 << 8));  /* r3=(V==0)?1:0 */                      \
-    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq r3,r2: T=(r2==r3) */\
-    sh4_emit16(0x8B00);  /* bf skip (N!=V → condition FALSE) */              \
+    sh4_emit16(0x0029 | (3 << 8));                                            \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8B00); /* bf skip (N!=V) */                                  \
   } while(0)
 
 /* LT: skip unless N!=V */
@@ -676,46 +657,46 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
     sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
     sh4_emit16(0x0029 | (3 << 8));                                            \
     sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
-    sh4_emit16(0x8900);  /* bt skip (N==V → condition LT FALSE) */           \
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8900); /* bt skip (N==V) */                                  \
   } while(0)
 
-/* GT: skip unless Z==0 AND N==V.
- * r1=(Z==0)?1:0, r2/r3 → (N==V)?1:0, tst to combine */
+/* GT: skip unless Z==0 AND N==V */
 #define generate_condition_gt(ireg)                                           \
   do {                                                                        \
     generate_load_reg(1, REG_Z_FLAG);                                         \
     sh4_emit16(0x2008 | (1 << 8) | (1 << 4));                                \
-    sh4_emit16(0x0029 | (1 << 8));  /* r1=(Z==0)?1:0 */                      \
+    sh4_emit16(0x0029 | (1 << 8));                                            \
     generate_load_reg(2, REG_N_FLAG);                                         \
     sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
     sh4_emit16(0x0029 | (2 << 8));                                            \
     generate_load_reg(3, REG_V_FLAG);                                         \
     sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
     sh4_emit16(0x0029 | (3 << 8));                                            \
-    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
-    sh4_emit16(0x0029 | (2 << 8));  /* movt r2=(N==V)?1:0 */                 \
-    sh4_emit16(0x2008 | (1 << 8) | (2 << 4)); /* tst r2,r1: T=((r1&r2)==0)*/\
-    sh4_emit16(0x8900);  /* bt skip: condition FALSE when Z||N!=V */          \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
+    sh4_emit16(0x2008 | (1 << 8) | (2 << 4));                                \
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8900); /* bt skip (Z||N!=V) */                               \
   } while(0)
 
-/* LE: skip unless Z!=0 OR N!=V. */
+/* LE: skip unless Z!=0 OR N!=V */
 #define generate_condition_le(ireg)                                           \
   do {                                                                        \
     generate_load_reg(1, REG_Z_FLAG);                                         \
     sh4_emit16(0x2008 | (1 << 8) | (1 << 4));                                \
-    sh4_emit16(0x0029 | (1 << 8));  /* r1=(Z==0)?1:0 */                      \
+    sh4_emit16(0x0029 | (1 << 8));                                            \
     generate_load_reg(2, REG_N_FLAG);                                         \
     sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
     sh4_emit16(0x0029 | (2 << 8));                                            \
     generate_load_reg(3, REG_V_FLAG);                                         \
     sh4_emit16(0x2008 | (3 << 8) | (3 << 4));                                \
     sh4_emit16(0x0029 | (3 << 8));                                            \
-    sh4_emit16(0x3000 | (2 << 8) | (3 << 4)); /* cmp/eq: T=(N==V) */        \
-    sh4_emit16(0x0029 | (2 << 8));  /* movt r2=(N==V)?1:0 */                 \
-    sh4_emit16(0x2008 | (1 << 8) | (2 << 4)); /* tst r2,r1: T=((r1&r2)==0)*/\
-    /* T=1 means Z!=0 or N!=V → condition LE TRUE → don't skip */           \
-    /* T=0 means Z==0 and N==V → condition LE FALSE → skip */               \
-    sh4_emit16(0x8B00);  /* bf skip */                                        \
+    sh4_emit16(0x3000 | (2 << 8) | (3 << 4));                                \
+    sh4_emit16(0x0029 | (2 << 8));                                            \
+    sh4_emit16(0x2008 | (1 << 8) | (2 << 4));                                \
+    backpatch_address = translation_ptr;                                      \
+    sh4_emit16(0x8B00); /* bf skip (Z==0 and N==V) */                         \
   } while(0)
 
 #define generate_condition(ireg)                                              \
@@ -1408,6 +1389,16 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   generate_function_call(execute_store_##type);                               \
 }
 
+/* Collapse separate flag slots back into CPSR (same as interpreter's
+ * collapse_flags but reading from reg[] memory slots). Must be called
+ * before any C code that reads reg[REG_CPSR] for flag bits. */
+void function_cc sh4_collapse_flags(void)
+{
+  reg[REG_CPSR] = (reg[REG_N_FLAG] << 31) | (reg[REG_Z_FLAG] << 30) |
+                  (reg[REG_C_FLAG] << 29) | (reg[REG_V_FLAG] << 28) |
+                  (reg[REG_CPSR] & 0xFF);
+}
+
 /* ---- SWI and execute helpers ---- */
 static void function_cc execute_swi(u32 pc)
 {
@@ -1831,6 +1822,10 @@ void init_emitter(bool must_swap) {
 u32 function_cc execute_arm_translate_internal(u32 cycles, void *regptr);
 
 u32 execute_arm_translate(u32 cycles) {
+#ifdef SH4_DYNAREC_DEBUG
+  printf("[ENTRY] execute_arm_translate: REG_PC=0x%08x CPSR=0x%08x mode=%u\n",
+         reg[REG_PC], reg[REG_CPSR], reg[CPU_MODE]);
+#endif
   return execute_arm_translate_internal(cycles, &reg[0]);
 }
 

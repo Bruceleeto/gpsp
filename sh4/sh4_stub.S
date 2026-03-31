@@ -84,7 +84,15 @@ defsymbl(execute_arm_translate_internal)
     nop
 
 lookup_pc:
-    mov.l   @(REG_PC, r8), r4     /* r4 = PC (save for later) */
+    mov.l   @(REG_PC, r8), r4     /* r4 = PC */
+    /* Mask BIOS mirror: if PC < 0x02000000, mask to 0x3FFF */
+    mov.l   bios_limit, r0
+    cmp/hs  r0, r4                 /* T = (r4 >= 0x02000000) */
+    bt      1f                     /* skip mask if not in BIOS range */
+    mov.w   bios_mask, r0
+    and     r0, r4
+    mov.l   r4, @(REG_PC, r8)     /* write back masked PC */
+1:
     /* Check CPSR thumb bit to decide ARM vs Thumb lookup */
     mov     #REG_CPSR, r0
     mov.l   @(r0, r8), r1
@@ -116,6 +124,11 @@ lookup_arm:
     jmp     @r0                 /* enter translated block */
     nop
 
+    .align 2
+bios_limit:
+    .long   0x02000000
+bios_mask:
+    .word   0x3FFF
     .align 2
 lookup_arm_addr:
     .long   _block_lookup_address_arm
@@ -161,13 +174,21 @@ update_gba_addr:
     .long   _update_gba
 
 /* ---- sh4_update_gba ---- */
-/* Called from JIT code: r0 = current PC */
+/* Called from JIT code via jsr: r0 = current PC.
+ * Must save/restore PR since we call update_gba internally. */
 defsymbl(sh4_update_gba)
     /* Save PC */
     mov.l   r0, @(REG_PC, r8)
 
-    /* Collapse flags back into CPSR */
-    /* TODO: proper flag collapse - for now just call with cycles */
+    /* Save caller's return address (PR is clobbered by jsr below) */
+    sts.l   pr, @-r15
+
+    /* Collapse separate flag slots back into CPSR before calling C */
+    mov.l   collapse_flags_addr, r0
+    jsr     @r0
+    nop
+
+    /* Call update_gba(remaining_cycles) */
     mov     r9, r4          /* arg0 = remaining cycles */
     mov.l   update_gba_addr2, r0
     jsr     @r0
@@ -175,7 +196,7 @@ defsymbl(sh4_update_gba)
 
     /* Check return: bit 31 = frame complete */
     cmp/pz  r0
-    bf      return_to_main
+    bf      sh4_update_return_main
 
     /* Extract new cycle count (bits 0-14) */
     mov.w   cycles_mask, r1
@@ -185,16 +206,30 @@ defsymbl(sh4_update_gba)
     /* Check if PC changed (bit 30) */
     mov.l   pc_change_mask, r1
     tst     r1, r0
-    bt      sh4_update_return
-    /* PC changed, re-lookup */
+    bt      sh4_update_return_jit
+
+    /* PC changed: pop sh4_update_gba's PR and JIT's PR, re-lookup */
+    lds.l   @r15+, pr      /* pop pr saved by sh4_update_gba */
+    add     #4, r15         /* discard pr pushed by JIT (lookup_pc) */
     bra     lookup_pc
     nop
 
-sh4_update_return:
+sh4_update_return_jit:
+    /* Return to JIT code - JIT will pop its own PR */
+    lds.l   @r15+, pr
     rts
     nop
 
+sh4_update_return_main:
+    /* Frame complete: pop sh4_update_gba's PR and JIT's PR, exit to C */
+    lds.l   @r15+, pr      /* pop pr saved by sh4_update_gba */
+    add     #4, r15         /* discard pr pushed by JIT (lookup_pc) */
+    bra     return_to_main
+    nop
+
     .align 2
+collapse_flags_addr:
+    .long   _sh4_collapse_flags
 update_gba_addr2:
     .long   _update_gba
 cycles_mask:
