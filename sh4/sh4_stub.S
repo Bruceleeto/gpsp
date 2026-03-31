@@ -95,6 +95,11 @@ lookup_pc:
     mov.l   lookup_thumb_addr, r0
     jsr     @r0
     nop
+    /* r0 = pointer to translated SH4 code, or NULL on failure */
+    tst     r0, r0
+    bt      return_to_main
+    mov.l   lookup_pc_lit, r1
+    lds     r1, pr
     jmp     @r0
     nop
 lookup_arm:
@@ -102,12 +107,20 @@ lookup_arm:
     mov.l   lookup_arm_addr, r0
     jsr     @r0
     nop
-    jmp     @r0
+    /* r0 = pointer to translated SH4 code, or NULL on failure */
+    tst     r0, r0
+    bt      return_to_main      /* NULL -> bail out cleanly */
+    /* Set PR = lookup_pc so that RTS in generated code loops back */
+    mov.l   lookup_pc_lit, r1
+    lds     r1, pr
+    jmp     @r0                 /* enter translated block */
     nop
 
     .align 2
 lookup_arm_addr:
     .long   _block_lookup_address_arm
+lookup_pc_lit:
+    .long   lookup_pc
 lookup_thumb_addr:
     .long   _block_lookup_address_thumb
 
@@ -196,6 +209,10 @@ defsymbl(sh4_indirect_branch_arm)
     mov.l   blk_arm_addr, r0
     jsr     @r0
     nop
+    tst     r0, r0
+    bt      return_to_main
+    mov.l   ind_lookup_pc_lit, r1
+    lds     r1, pr
     jmp     @r0
     nop
 
@@ -204,6 +221,10 @@ defsymbl(sh4_indirect_branch_thumb)
     mov.l   blk_thumb_addr, r0
     jsr     @r0
     nop
+    tst     r0, r0
+    bt      return_to_main
+    mov.l   ind_lookup_pc_lit, r1
+    lds     r1, pr
     jmp     @r0
     nop
 
@@ -212,6 +233,10 @@ defsymbl(sh4_indirect_branch_dual)
     mov.l   blk_dual_addr, r0
     jsr     @r0
     nop
+    tst     r0, r0
+    bt      return_to_main
+    mov.l   ind_lookup_pc_lit, r1
+    lds     r1, pr
     jmp     @r0
     nop
 
@@ -222,6 +247,8 @@ blk_thumb_addr:
     .long   _block_lookup_address_thumb
 blk_dual_addr:
     .long   _block_lookup_address_dual
+ind_lookup_pc_lit:
+    .long   lookup_pc
 
 /* ---- BSS: Global state ---- */
 .bss

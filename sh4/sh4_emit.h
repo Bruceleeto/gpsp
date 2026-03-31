@@ -17,6 +17,9 @@ void sh4_indirect_branch_thumb(u32 address);
 void sh4_indirect_branch_dual(u32 address);
 /* execute_store_cpsr is both a C function (declared in cpu.h) and a macro below */
 
+/* Debug/validation - define SH4_DYNAREC_DEBUG before including to enable */
+#include "sh4_debug.h"
+
 /* ---- SH4 instruction emission ---- */
 #define sh4_emit16(value)                                                     \
   *((u16 *)translation_ptr) = (u16)(value);                                   \
@@ -110,7 +113,23 @@ void sh4_indirect_branch_dual(u32 address);
 #define generate_multiply_u64_add(a, b, c) sh4_emit16(0x0009)
 
 #define generate_function_call(func)      sh4_emit16(0x0009)
-#define generate_exit_block()             sh4_emit16(0x0009)
+
+/* generate_exit_block: MUST actually return to the main loop.
+ * Without this, generated code slides off the NOP sled into garbage.
+ * Emits: mov.l @(disp,PC),r0; jmp @r0; nop
+ * The literal pool entry points to lookup_pc in sh4_stub.S.
+ *
+ * For Phase 1 (NOP stubs), we use a simple strategy:
+ * Just emit RTS + NOP to return to the caller (lookup_arm's jsr).
+ * This won't correctly continue execution, but it won't CRASH,
+ * which means you can observe the trace output and validate.
+ *
+ * When you implement real code gen, replace this with a proper
+ * jump to lookup_pc or sh4_update_gba.
+ */
+#define generate_exit_block()                                                 \
+  sh4_emit16(0x000b); /* rts */                                               \
+  sh4_emit16(0x0009)  /* nop (delay slot) */
 
 #define generate_update_flag(type, flag)  sh4_emit16(0x0009)
 #define generate_load_spsr(ireg, idx)     sh4_emit16(0x0009)
@@ -126,12 +145,15 @@ void sh4_indirect_branch_dual(u32 address);
 #define generate_branch_patch_conditional(dest, target)
 #define generate_branch_patch_unconditional(dest, target)
 
-#define generate_branch_no_cycle_update(wb, pc_val)  sh4_emit16(0x0009)
-#define generate_branch_cycle_update(wb, pc_val)     sh4_emit16(0x0009)
-#define generate_indirect_branch_cycle_update(type)  sh4_emit16(0x0009)
-#define generate_indirect_branch_no_cycle_update(type) sh4_emit16(0x0009)
-#define generate_indirect_branch_arm()    sh4_emit16(0x0009)
-#define generate_indirect_branch_dual()   sh4_emit16(0x0009)
+/* Branch/exit macros: all must emit rts+nop so generated code returns
+ * to lookup_pc (PR is set up by the stub before entering translated code).
+ * Phase 1: no actual branch logic, just exit the block cleanly. */
+#define generate_branch_no_cycle_update(wb, pc_val)   generate_exit_block()
+#define generate_branch_cycle_update(wb, pc_val)       generate_exit_block()
+#define generate_indirect_branch_cycle_update(type)    generate_exit_block()
+#define generate_indirect_branch_no_cycle_update(type) generate_exit_block()
+#define generate_indirect_branch_arm()                 generate_exit_block()
+#define generate_indirect_branch_dual()                generate_exit_block()
 
 /* ---- Condition codes ---- */
 #define generate_condition_eq(ireg)       sh4_emit16(0x0009)

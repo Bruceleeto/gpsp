@@ -254,17 +254,11 @@ typedef struct
     __builtin___clear_cache(baseaddr, endptr);
   }
 #elif defined(SH4_ARCH)
+  #include <arch/cache.h>
   void platform_cache_sync(void *baseaddr, void *endptr) {
-    /* SH4: flush dcache and invalidate icache */
-    unsigned addr;
-    for (addr = (unsigned)baseaddr & ~31; addr < (unsigned)endptr; addr += 32) {
-      __asm__ volatile("ocbwb @%0" :: "r"(addr));
-    }
-    /* Invalidate icache by writing to address array */
-    for (addr = (unsigned)baseaddr & ~31; addr < (unsigned)endptr; addr += 32) {
-      *(volatile unsigned *)(0xF0000000 | (addr & 0x1FE0)) =
-        (addr & 0xFFFFFC00);
-    }
+    size_t len = (u8*)endptr - (u8*)baseaddr;
+    dcache_flush_range((uintptr_t)baseaddr, len);
+    icache_inval_range((uintptr_t)baseaddr, len);
   }
 #else
   /* x86 CPUs have icache consistency checks */
@@ -2670,12 +2664,14 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
     u8 *ret = block_lookup_translate_arm(pc);
     if (ret) {
       translate_icache_sync();
+      debug_lookup("ARM", pc, ret);
       return ret;
     }
   }
 
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
+  debug_null_guard(NULL, pc);
   return NULL;
 }
 
@@ -2686,11 +2682,13 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
     u8 *ret = block_lookup_translate_thumb(pc);
     if (ret) {
       translate_icache_sync();
+      debug_lookup("THUMB", pc, ret);
       return ret;
     }
   }
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
+  debug_null_guard(NULL, pc);
   return NULL;
 }
 
@@ -3078,6 +3076,8 @@ bool translate_block_arm(u32 pc, bool ram_region)
     scan_block(arm, no);
   }
 
+  debug_block_start("arm", block_start_pc, block_start_pc, block_end_pc);
+
   for(i = 0; i < block_exit_position; i++)
   {
     branch_target = block_exits[i].branch_target;
@@ -3096,6 +3096,8 @@ bool translate_block_arm(u32 pc, bool ram_region)
   block_data_position = 0;
 
   last_condition = 0x0E;
+
+  u8 *block_code_start = translation_ptr;  /* for debug hexdump */
 
   while(pc != block_end_pc)
   {
@@ -3132,6 +3134,9 @@ bool translate_block_arm(u32 pc, bool ram_region)
       generate_cycle_update();
     }
   }
+
+  debug_block_done("arm", block_code_start, translation_ptr, block_start_pc);
+  debug_hexdump_block(block_code_start, translation_ptr);
 
   /* This can happen if the last instruction is *not* inconditional */
   if ((last_condition & 0x0F) != 0x0E) {
@@ -3241,6 +3246,8 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     scan_block(thumb, no);
   }
 
+  debug_block_start("thumb", block_start_pc, block_start_pc, block_end_pc);
+
   for(i = 0; i < block_exit_position; i++)
   {
     branch_target = block_exits[i].branch_target;
@@ -3257,6 +3264,8 @@ bool translate_block_thumb(u32 pc, bool ram_region)
 
   block_exit_position = 0;
   block_data_position = 0;
+
+  u8 *block_code_start = translation_ptr;  /* for debug hexdump */
 
   while(pc != block_end_pc)
   {
@@ -3294,6 +3303,9 @@ bool translate_block_thumb(u32 pc, bool ram_region)
       generate_cycle_update();
     }
   }
+
+  debug_block_done("thumb", block_code_start, translation_ptr, block_start_pc);
+  debug_hexdump_block(block_code_start, translation_ptr);
 
   /* Unconditionally generate translation targets. In case we hit one or
      in the unlikely case that block was too big (and not finalized) */
