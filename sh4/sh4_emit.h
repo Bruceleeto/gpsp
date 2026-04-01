@@ -15,7 +15,7 @@ u32 sh4_update_gba(u32 pc);
 void sh4_indirect_branch_arm(u32 address);
 void sh4_indirect_branch_thumb(u32 address);
 void sh4_indirect_branch_dual(u32 address);
-void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
+u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
 
 /* Debug/validation - define SH4_DYNAREC_DEBUG before including to enable */
 #include "sh4_debug.h"
@@ -355,6 +355,57 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_rcr1(ireg)                                                   \
   sh4_emit16(0x4025 | ((ireg) << 8))
 
+/* ---- Safe C shift+carry helpers ---- */
+/* These compute the shift result AND the correct carry flag in one call,
+ * bypassing the broken generate_update_flag(c) which uses stale regs. */
+static u32 function_cc sh4_lsl_carry(u32 val, u32 amount) {
+  if (amount == 0) return val;  /* no shift, no carry change */
+  if (amount < 32) {
+    reg[REG_C_FLAG] = (val >> (32 - amount)) & 1;
+    return val << amount;
+  }
+  reg[REG_C_FLAG] = (amount == 32) ? (val & 1) : 0;
+  return 0;
+}
+static u32 function_cc sh4_lsr_carry(u32 val, u32 amount) {
+  if (amount == 0) return val;
+  if (amount < 32) {
+    reg[REG_C_FLAG] = (val >> (amount - 1)) & 1;
+    return val >> amount;
+  }
+  reg[REG_C_FLAG] = (amount == 32) ? ((val >> 31) & 1) : 0;
+  return 0;
+}
+static u32 function_cc sh4_asr_carry(u32 val, u32 amount) {
+  if (amount == 0) return val;
+  if (amount < 32) {
+    reg[REG_C_FLAG] = ((s32)val >> (amount - 1)) & 1;
+    return (u32)((s32)val >> amount);
+  }
+  reg[REG_C_FLAG] = (val >> 31) & 1;
+  return (u32)((s32)val >> 31);
+}
+static u32 function_cc sh4_ror_carry(u32 val, u32 amount) {
+  if (amount == 0) return val;
+  amount &= 31;
+  if (amount == 0) { reg[REG_C_FLAG] = (val >> 31) & 1; return val; }
+  reg[REG_C_FLAG] = (val >> (amount - 1)) & 1;
+  return (val >> amount) | (val << (32 - amount));
+}
+static u32 function_cc sh4_rrx_carry(u32 val, u32 old_carry) {
+  reg[REG_C_FLAG] = val & 1;
+  return (val >> 1) | (old_carry ? 0x80000000u : 0);
+}
+
+/* Emit: a0=value already loaded, set a1=shift_amount, call helper,
+ * move result from rv(r0) to ireg(a0). */
+#define generate_shift_carry_call(ireg, amount, func)                         \
+  do {                                                                        \
+    generate_load_imm(a1, amount);                                            \
+    generate_function_call(func);                                             \
+    if ((ireg) != rv) generate_mov(ireg, rv);                                 \
+  } while(0)
+
 /* ---- Multiply ---- */
 /* mul.l Rm, Rn -> MACL = Rm * Rn (0x0007), then sts MACL, Rn (0x001A) */
 
@@ -405,8 +456,28 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* ---- Flags (stubs - T-bit based, Phase 3) ---- */
 #define generate_update_flag(type, flag)  sh4_emit16(0x0009)
-#define generate_load_spsr(ireg, idx)     sh4_emit16(0x0009)
-#define generate_store_spsr(ireg, idx)    sh4_emit16(0x0009)
+
+/* SPSR load/store via C helpers (indexed by CPU mode) */
+static u32 function_cc sh4_load_spsr(u32 mode_idx) {
+  return spsr[mode_idx & 0xF];
+}
+static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
+  spsr[mode_idx & 0xF] = value;
+}
+
+#define generate_load_spsr(ireg, idx)                                         \
+  do {                                                                        \
+    generate_mov(a0, idx);                                                    \
+    generate_function_call(sh4_load_spsr);                                    \
+    if ((ireg) != rv) generate_mov(ireg, rv);                                 \
+  } while(0)
+
+#define generate_store_spsr(ireg, idx)                                        \
+  do {                                                                        \
+    generate_mov(a0, ireg);                                                   \
+    generate_mov(a1, idx);                                                    \
+    generate_function_call(sh4_store_spsr);                                   \
+  } while(0)
 
 /* ---- Cycle counting ---- */
 /* Subtract accumulated cycle_count from reg_cycles (r9). */
@@ -779,12 +850,19 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* ---- Store with PC handling ---- */
 #define generate_store_reg_pc_no_flags(ireg, reg_index)                       \
-  generate_store_reg(ireg, reg_index)
+  generate_store_reg(ireg, reg_index);                                        \
+  if(reg_index == 15) {                                                       \
+    generate_mov(a0, ireg);                                                   \
+    generate_indirect_branch_arm();                                           \
+  }
 
 #define generate_store_reg_pc_flags(ireg, reg_index)                          \
   generate_store_reg(ireg, reg_index);                                        \
   if(reg_index == 15) {                                                       \
-    generate_indirect_branch_arm();                                           \
+    generate_mov(arg0, ireg);                                                 \
+    generate_function_call(execute_spsr_restore);                             \
+    generate_mov(a0, rv);  /* move return addr from r0 to r4 for branch */   \
+    generate_indirect_branch_dual();                                          \
   }
 
 #define generate_store_reg_pc_thumb(ireg, rd)                                 \
@@ -864,15 +942,13 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_shift_imm_lsl_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_left(ireg, shift);                                         \
-    generate_update_flag(c, REG_C_FLAG);                                      \
+    generate_shift_carry_call(ireg, shift, sh4_lsl_carry);                    \
   }
 
 #define generate_shift_imm_lsr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_right(ireg, shift);                                        \
-    generate_update_flag(c, REG_C_FLAG);                                      \
+    generate_shift_carry_call(ireg, shift, sh4_lsr_carry);                    \
   } else {                                                                    \
     generate_shift_right(ireg, 31);                                           \
     generate_store_reg(ireg, REG_C_FLAG);                                     \
@@ -882,8 +958,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_shift_imm_asr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_right_arithmetic(ireg, shift);                             \
-    generate_update_flag(c, REG_C_FLAG);                                      \
+    generate_shift_carry_call(ireg, shift, sh4_asr_carry);                    \
   } else {                                                                    \
     generate_shift_right_arithmetic(ireg, 31);                                \
     generate_update_flag(nz, REG_C_FLAG);                                     \
@@ -892,8 +967,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_shift_imm_ror_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_rotate_right(ireg, shift);                                       \
-    generate_update_flag(c, REG_C_FLAG);                                      \
+    generate_shift_carry_call(ireg, shift, sh4_ror_carry);                    \
   } else {                                                                    \
     generate_rrx_flags(ireg);                                                 \
   }
@@ -906,32 +980,41 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_asr_no_flags_reg(ireg)   generate_shift_right_arithmetic_var(ireg)
 #define generate_ror_no_flags_reg(ireg)   generate_rotate_right_var(ireg)
 
+/* Register shift with flags: a1 already has shift amount from
+ * generate_shift_reg. Call C helper for correct carry. */
 #define generate_lsl_flags_reg(ireg)                                          \
-  generate_shift_left_var(ireg);                                              \
+  generate_function_call(sh4_lsl_carry);                                      \
+  if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_lsr_flags_reg(ireg)                                          \
-  generate_shift_right_var(ireg);                                             \
+  generate_function_call(sh4_lsr_carry);                                      \
+  if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_asr_flags_reg(ireg)                                          \
-  generate_shift_right_arithmetic_var(ireg);                                  \
+  generate_function_call(sh4_asr_carry);                                      \
+  if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_ror_flags_reg(ireg)                                          \
-  generate_rotate_right_var(ireg);                                            \
+  generate_function_call(sh4_ror_carry);                                      \
+  if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
+/* RRX: rotate right through carry (1-bit). Old C becomes MSB, old LSB
+ * becomes new C. Use C helper for correctness. */
 #define generate_rrx_flags(ireg)                                              \
-  generate_load_imm(a2, 0xffffffff);                                          \
-  generate_add_memreg(a2, REG_C_FLAG);                                        \
-  generate_rcr1(a0);                                                          \
-  generate_update_flag(c, REG_C_FLAG);                                        \
-  generate_mov(ireg, a0);
+  do {                                                                        \
+    /* a0 already has the value. a1 = old carry. */                            \
+    generate_load_reg(a1, REG_C_FLAG);                                        \
+    generate_function_call(sh4_rrx_carry);                                    \
+    if ((ireg) != rv) generate_mov(ireg, rv);                                 \
+  } while(0)
 
 #define generate_rrx(ireg)                                                    \
   generate_load_reg(a2, REG_C_FLAG);                                          \
@@ -975,41 +1058,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 /* ---- Flag collapse: pack N,Z,C,V back into CPSR bits 31-28 ---- */
 #define collapse_flags(a, b)                                                  \
-  do {                                                                        \
-    generate_load_reg(0, REG_CPSR);                                           \
-    generate_load_imm(1, 0x0FFFFFFF);                                         \
-    sh4_emit16(0x2009 | (0 << 8) | (1 << 4)); /* and r1, r0: clear NZCV */  \
-    /* N flag → bit 31 */                                                    \
-    generate_load_reg(1, REG_N_FLAG);                                         \
-    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1,r1 */               \
-    sh4_emit16(0x8900 | 1); /* bt +1 (skip if N==0) */                       \
-    sh4_emit16(0xCA00 | 0x80); /* xor #0x80, r0 -- sets bit 7 */            \
-    /* But N is bit 31... we need to shift. Actually, let's build in r1 */    \
-    /* Simpler approach: build flag word in r1, then OR into r0 */            \
-    sh4_emit16(0xE000 | (1 << 8) | 0); /* mov #0, r1 */                     \
-    generate_load_reg(2, REG_N_FLAG);                                         \
-    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
-    sh4_emit16(0x8900 | 0); /* bt +0 (skip next if N==0) */                  \
-    sh4_emit16(0x7000 | (1 << 8) | 0x80); /* add #0x80, r1 */               \
-    generate_load_reg(2, REG_Z_FLAG);                                         \
-    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
-    sh4_emit16(0x8900 | 0);                                                   \
-    sh4_emit16(0x7000 | (1 << 8) | 0x40); /* add #0x40, r1 */               \
-    generate_load_reg(2, REG_C_FLAG);                                         \
-    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
-    sh4_emit16(0x8900 | 0);                                                   \
-    sh4_emit16(0x7000 | (1 << 8) | 0x20); /* add #0x20, r1 */               \
-    generate_load_reg(2, REG_V_FLAG);                                         \
-    sh4_emit16(0x2008 | (2 << 8) | (2 << 4));                                \
-    sh4_emit16(0x8900 | 0);                                                   \
-    sh4_emit16(0x7000 | (1 << 8) | 0x10); /* add #0x10, r1 */               \
-    /* r1 has flags in bits 7-4 (N=0x80,Z=0x40,C=0x20,V=0x10) */            \
-    /* Need them in bits 31-28: shift left 24 */                              \
-    sh4_emit16(0xE000 | (2 << 8) | 24);   /* mov #24, r2 */                 \
-    sh4_emit16(0x400D | (1 << 8) | (2 << 4)); /* shld r2, r1 (<<24) */      \
-    sh4_emit16(0x200B | (0 << 8) | (1 << 4)); /* or r1, r0 */               \
-    generate_store_reg(0, REG_CPSR);                                          \
-  } while(0)
+  generate_function_call(sh4_collapse_flags)
 
 /* ---- Flag update macros ---- */
 /* generate_update_flag dispatches on type: z, s, c, nc, o, nz
@@ -1273,7 +1322,11 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   generate_load_imm(a1, cpsr_masks[psr_pfield][0]);                           \
   generate_load_imm(a2, cpsr_masks[psr_pfield][1]);                           \
   generate_store_reg_i32(pc, REG_PC);                                         \
-  generate_function_call(sh4_execute_store_cpsr)
+  generate_function_call(sh4_execute_store_cpsr);                             \
+  /* rv (r0) = 0 or IRQ addr. If non-zero, reg[REG_PC] is already set. */   \
+  sh4_emit16(0x2008 | (rv << 8) | (rv << 4)); /* tst r0,r0 */               \
+  sh4_emit16(0x8900 | 1); /* bt +1 (skip rts if no IRQ) */                  \
+  generate_exit_block() /* rts+nop: exit to lookup_pc → reg[REG_PC] */
 
 #define execute_store_spsr()                                                  \
   generate_load_reg(a2, CPU_MODE);                                            \
@@ -1396,7 +1449,10 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 
 #define arm_block_memory_adjust_pc_store()
 #define arm_block_memory_adjust_pc_load()                                     \
-  if(reg_list & 0x8000) { generate_indirect_branch_arm(); }
+  if(reg_list & 0x8000) {                                                     \
+    generate_mov(a0, rv); /* rv→a0: rv has loaded PC, a0 is what branch uses */\
+    generate_indirect_branch_arm();                                           \
+  }
 
 #define arm_block_memory_offset_down_a()                                      \
   generate_add_imm(a0, -((word_bit_count(reg_list) * 4) - 4))
@@ -1499,13 +1555,21 @@ static void function_cc execute_swi(u32 pc)
 static u32 execute_store_cpsr_body(void);
 
 /* Called from JIT: a0=new_cpsr, a1=user_mask, a2=privileged_mask */
-void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask)
+u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask)
 {
   u32 store_mask = (reg[CPU_MODE] & 0x10) ? priv_mask : user_mask;
   u32 old_cpsr = reg[REG_CPSR];
   reg[REG_CPSR] = (new_cpsr & store_mask) | (old_cpsr & ~store_mask);
-  if (store_mask & 0xFF)
-    execute_store_cpsr_body();
+  sh4_extract_flags();
+  if (store_mask & 0xFF) {
+    u32 new_pc = execute_store_cpsr_body();
+    if (new_pc) {
+      reg[REG_PC] = new_pc;
+      sh4_extract_flags();
+      return new_pc;
+    }
+  }
+  return 0;
 }
 
 u32 execute_store_cpsr_body()
@@ -1526,18 +1590,25 @@ u32 execute_store_cpsr_body()
 
 u32 execute_spsr_restore(u32 address)
 {
-  set_cpu_mode(cpu_modes[reg[REG_CPSR] & 0xF]);
-  if((io_registers[REG_IE] & io_registers[REG_IF]) &&
-     io_registers[REG_IME] && ((reg[REG_CPSR] & 0x80) == 0))
+  if(reg[CPU_MODE] != MODE_USER && reg[CPU_MODE] != MODE_SYSTEM)
   {
-    REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;
-    REG_SPSR(MODE_IRQ) = reg[REG_CPSR];
-    reg[REG_CPSR] = 0xD2;
-    address = 0x00000018;
-    set_cpu_mode(MODE_IRQ);
+    reg[REG_CPSR] = REG_SPSR(reg[CPU_MODE]);
+    sh4_extract_flags();
+    set_cpu_mode(cpu_modes[reg[REG_CPSR] & 0xF]);
+
+    if((io_registers[REG_IE] & io_registers[REG_IF]) &&
+       io_registers[REG_IME] && ((reg[REG_CPSR] & 0x80) == 0))
+    {
+      REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;
+      REG_SPSR(MODE_IRQ) = reg[REG_CPSR];
+      reg[REG_CPSR] = 0xD2;
+      address = 0x00000018;
+      set_cpu_mode(MODE_IRQ);
+    }
+
+    if(reg[REG_CPSR] & 0x20)
+      address |= 0x01;
   }
-  if(reg[REG_CPSR] & 0x20)
-    address |= 0x01;
   return address;
 }
 
@@ -1565,15 +1636,45 @@ u32 execute_spsr_restore(u32 address)
 
 #define arm_process_cheats()    generate_function_call(process_cheats);
 
-/* ---- ARM HLE div (stub - just call SWI handler) ---- */
+/* ---- ARM HLE div ---- */
+static void function_cc sh4_hle_div(void)
+{
+  s32 num = (s32)reg[0];
+  s32 den = (s32)reg[1];
+  if (den == 0) { /* Division by zero: match BIOS behavior */
+    reg[0] = (num < 0) ? -1 : 1;
+    reg[1] = (u32)num;
+    reg[3] = 1;
+  } else {
+    reg[0] = (u32)(num / den);
+    reg[1] = (u32)(num % den);
+    reg[3] = (u32)(num / den < 0 ? -(num / den) : num / den);
+  }
+}
+
+static void function_cc sh4_hle_div_arm(void)
+{
+  s32 num = (s32)reg[1];
+  s32 den = (s32)reg[0];
+  if (den == 0) {
+    reg[0] = (num < 0) ? -1 : 1;
+    reg[1] = (u32)num;
+    reg[3] = 1;
+  } else {
+    reg[0] = (u32)(num / den);
+    reg[1] = (u32)(num % den);
+    reg[3] = (u32)(num / den < 0 ? -(num / den) : num / den);
+  }
+}
+
 #define arm_hle_div(cpu_mode)                                                 \
 {                                                                             \
-  arm_swi();                                                                  \
+  generate_function_call(sh4_hle_div);                                        \
 }
 
 #define arm_hle_div_arm(cpu_mode)                                             \
 {                                                                             \
-  arm_swi();                                                                  \
+  generate_function_call(sh4_hle_div_arm);                                    \
 }
 
 /* ---- Translation gate ---- */
@@ -1676,22 +1777,22 @@ u32 execute_spsr_restore(u32 address)
 
 /* Thumb shifts */
 #define thumb_lsl_imm_op()                                                    \
-  if (imm) { generate_shift_left(a0, imm); generate_update_flag(c, REG_C_FLAG); } \
+  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsl_carry); }             \
   else { generate_or(a0, a0); }                                               \
   update_logical_flags()
 
 #define thumb_lsr_imm_op()                                                    \
-  if (imm) { generate_shift_right(a0, imm); generate_update_flag(c, REG_C_FLAG); } \
+  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsr_carry); }             \
   else { generate_shift_right(a0, 31); generate_update_flag(nz, REG_C_FLAG); generate_xor(a0, a0); } \
   update_logical_flags()
 
 #define thumb_asr_imm_op()                                                    \
-  if (imm) { generate_shift_right_arithmetic(a0, imm); generate_update_flag(c, REG_C_FLAG); } \
+  if (imm) { generate_shift_carry_call(a0, imm, sh4_asr_carry); }             \
   else { generate_shift_right_arithmetic(a0, 31); generate_update_flag(s, REG_C_FLAG); } \
   update_logical_flags()
 
 #define thumb_ror_imm_op()                                                    \
-  if (imm) { generate_rotate_right(a0, imm); generate_update_flag(c, REG_C_FLAG); } \
+  if (imm) { generate_shift_carry_call(a0, imm, sh4_ror_carry); }             \
   else { generate_rrx_flags(a0); }                                            \
   update_logical_flags()
 
@@ -1901,6 +2002,9 @@ u32 execute_spsr_restore(u32 address)
 /* Init and entry point                                                  */
 /* ==================================================================== */
 
+/* BIOS interpreter removed — all BIOS code runs through the dynarec now.
+ * See bugs 15-21 in dreamcast.md for the dynarec fixes that made this possible. */
+
 void init_emitter(bool must_swap) {
   rom_cache_watermark = INITIAL_ROM_WATERMARK;
   init_bios_hooks();
@@ -1909,13 +2013,6 @@ void init_emitter(bool must_swap) {
 u32 function_cc execute_arm_translate_internal(u32 cycles, void *regptr);
 
 u32 execute_arm_translate(u32 cycles) {
-#ifdef SH4_DYNAREC_DEBUG
-  { static int _ec = 0;
-    _ec++;
-    if (_ec <= 10 || (_ec % 60) == 0)
-      printf("[FRAME %d] PC=%08x cycles=%u\n", _ec, reg[REG_PC], cycles);
-  }
-#endif
   return execute_arm_translate_internal(cycles, &reg[0]);
 }
 
