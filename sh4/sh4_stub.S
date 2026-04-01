@@ -61,17 +61,10 @@ defsymbl(execute_arm_translate_internal)
     mov     r4, r9          /* reg_cycles = cycles */
     mov     r5, r8          /* reg_base = regptr */
 
-    /* Extract flags from CPSR into separate slots */
-    /* For now, just zero them - proper extraction in Phase 3 */
-    mov     #0, r1
-    mov     #REG_N_FLAG, r0
-    mov.l   r1, @(r0, r8)
-    mov     #REG_Z_FLAG, r0
-    mov.l   r1, @(r0, r8)
-    mov     #REG_C_FLAG, r0
-    mov.l   r1, @(r0, r8)
-    mov     #REG_V_FLAG, r0
-    mov.l   r1, @(r0, r8)
+    /* Extract flags from CPSR into separate flag slots */
+    mov.l   extract_flags_addr, r0
+    jsr     @r0
+    nop
 
     /* Check if CPU is halted */
     mov     #CPU_HALT_STATE, r0
@@ -125,6 +118,8 @@ lookup_arm:
     nop
 
     .align 2
+extract_flags_addr:
+    .long   _sh4_extract_flags
 bios_limit:
     .long   0x02000000
 bios_mask:
@@ -177,8 +172,7 @@ update_gba_addr:
 /* Called from JIT code via jsr: r0 = current PC.
  * Must save/restore PR since we call update_gba internally. */
 defsymbl(sh4_update_gba)
-    /* Save PC */
-    mov.l   r0, @(REG_PC, r8)
+    /* PC is already stored to reg[REG_PC] by the JIT caller */
 
     /* Save caller's return address (PR is clobbered by jsr below) */
     sts.l   pr, @-r15

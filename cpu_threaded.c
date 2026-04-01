@@ -2627,6 +2627,9 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       { /* Not found, go ahead and translate, and backfill the hash table */  \
         u8 *blkptr;                                                           \
         bool result;                                                          \
+        /* Align to 4 bytes for hashhdr_type (u32 fields) */                  \
+        if ((uintptr_t)rom_translation_ptr & 3)                               \
+          rom_translation_ptr += 4 - ((uintptr_t)rom_translation_ptr & 3);    \
         bhdr = (hashhdr_type*)rom_translation_ptr;                            \
         bhdr->pc_value = key;                                                 \
         bhdr->next_entry = 0;                                                 \

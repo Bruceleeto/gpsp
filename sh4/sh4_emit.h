@@ -127,7 +127,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
       *(u16 *)_li_s = 0xD000 | ((ireg) << 8) |                               \
         (u32)((_li_c - (u8*)(((uintptr_t)_li_s + 4) & ~(uintptr_t)3)) >> 2);\
       *(u16 *)(_li_s + 2) = 0xA000 |                                         \
-        ((u32)((translation_ptr - (_li_s + 2) - 4) >> 1) & 0xFFF);                                                                       \
+        ((u32)((translation_ptr - (_li_s + 2) - 4) >> 1) & 0xFFF);           \
     }                                                                         \
   } while(0)
 
@@ -409,11 +409,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_store_spsr(ireg, idx)    sh4_emit16(0x0009)
 
 /* ---- Cycle counting ---- */
-/* Subtract accumulated cycle_count from reg_cycles (r9), then check if
- * cycles are exhausted (r9 < 0).  If so, store current ARM PC and call
- * sh4_update_gba so the emulator can process video/timer/IRQ events.
- * Without this check, tight polling loops (e.g. VSync wait) would spin
- * forever because update_gba never gets a chance to advance time. */
+/* Subtract accumulated cycle_count from reg_cycles (r9). */
 #define generate_cycle_update()                                               \
   do {                                                                        \
     if (cycle_count) {                                                        \
@@ -424,21 +420,28 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
         sh4_emit16(0x3008 | (reg_cycles << 8) | (0 << 4)); /* sub r0, r9 */  \
       }                                                                       \
       cycle_count = 0;                                                        \
-      /* Check exhaustion: if r9 >= 0 skip the update_gba call */             \
-      sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                \
-      sh4_emit16(0x8900); /* bt placeholder */                                \
-      do {                                                                    \
-        u8 *_cyc_patch = translation_ptr - 2;                                 \
-        generate_load_imm(0, pc); /* r0 = current ARM PC */                   \
-        sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                \
-        generate_load_imm(1, (u32)sh4_update_gba);                            \
-        sh4_emit16(0x400B | (1 << 8)); /* jsr @r1 */                         \
-        sh4_emit16(0x0009); /* nop (delay slot) */                            \
-        sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                \
-        *(u16*)_cyc_patch = 0x8900 |                                          \
-          (((translation_ptr - _cyc_patch - 4) / 2) & 0xFF);                 \
-      } while(0);                                                             \
     }                                                                         \
+  } while(0)
+
+/* Subtract cycles AND check for exhaustion. Used at conditional branch
+ * headers (loop points) so polling loops yield to update_gba. */
+#define generate_cycle_update_and_check()                                     \
+  do {                                                                        \
+    generate_cycle_update();                                                   \
+    sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                  \
+    sh4_emit16(0x8900); /* bt placeholder */                                  \
+    do {                                                                      \
+      u8 *_cyc_patch = translation_ptr - 2;                                   \
+      generate_store_reg_i32(pc, REG_PC); /* save PC for re-entry */          \
+      generate_load_imm(0, pc); /* r0 for update_gba compat */                \
+      sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                  \
+      generate_load_imm(1, (u32)sh4_update_gba);                              \
+      sh4_emit16(0x400B | (1 << 8)); /* jsr @r1 */                           \
+      sh4_emit16(0x0009); /* nop */                                           \
+      sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                  \
+      *(u16*)_cyc_patch = 0x8900 |                                            \
+        (((translation_ptr - _cyc_patch - 4) / 2) & 0xFF);                   \
+    } while(0);                                                               \
   } while(0)
 
 #define generate_block_prologue()
@@ -509,28 +512,73 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
   generate_indirect_branch_cycle_update_##type()
 
 #define generate_indirect_branch_cycle_update_arm()                           \
-  generate_cycle_update();                                                    \
   generate_store_reg(a0, REG_PC);                                             \
-  sh4_emit16(0x4011 | (reg_cycles << 8));                                     \
-  sh4_emit16(0x8900);                                                         \
+  /* Subtract cycles but DON'T store PC in exhaustion check -                \
+   * REG_PC already has the correct branch target from above. */             \
   do {                                                                        \
-    u8 *_bt_patch = translation_ptr - 2;                                      \
-    generate_mov(0, a0); /* r0 = PC */                                        \
-    sh4_emit16(0x4022 | (15 << 8));                                           \
-    generate_load_imm(1, (u32)sh4_update_gba);                                \
-    sh4_emit16(0x400B | (1 << 8));                                            \
-    sh4_emit16(0x0009);                                                        \
-    sh4_emit16(0x4026 | (15 << 8));                                           \
-    *(u16*)_bt_patch = 0x8900 |                                               \
-      (((translation_ptr - _bt_patch - 4) / 2) & 0xFF);                      \
+    if (cycle_count) {                                                        \
+      if (cycle_count <= 127) {                                               \
+        sh4_emit16(0x7000 | (reg_cycles << 8) |                              \
+                   ((u32)(-(s32)cycle_count) & 0xFF));                        \
+      } else {                                                                \
+        generate_load_imm(0, cycle_count);                                    \
+        sh4_emit16(0x3008 | (reg_cycles << 8) | (0 << 4));                   \
+      }                                                                       \
+      cycle_count = 0;                                                        \
+      sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                \
+      sh4_emit16(0x8900); /* bt placeholder */                                \
+      do {                                                                    \
+        u8 *_cyc_patch = translation_ptr - 2;                                 \
+        /* REG_PC already set - just load r0 for update_gba compat */         \
+        generate_load_reg(0, REG_PC);                                         \
+        sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                \
+        generate_load_imm(1, (u32)sh4_update_gba);                            \
+        sh4_emit16(0x400B | (1 << 8)); /* jsr @r1 */                         \
+        sh4_emit16(0x0009); /* nop */                                         \
+        sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                \
+        *(u16*)_cyc_patch = 0x8900 |                                          \
+          (((translation_ptr - _cyc_patch - 4) / 2) & 0xFF);                 \
+      } while(0);                                                             \
+    }                                                                         \
   } while(0);                                                                 \
   generate_exit_block()
 
 #define generate_indirect_branch_cycle_update_thumb()                         \
   generate_indirect_branch_cycle_update_arm()
 
-#define generate_indirect_branch_cycle_update_dual()                          \
+/* Variant for pop+PC / ldm+PC: REG_PC already stored, just check cycles */
+#define generate_indirect_branch_exit_with_cycle()                            \
   generate_cycle_update();                                                    \
+  generate_exit_block()
+
+#define generate_indirect_branch_cycle_update_dual()                          \
+  generate_store_reg(a0, REG_PC);                                             \
+  do {                                                                        \
+    if (cycle_count) {                                                        \
+      if (cycle_count <= 127) {                                               \
+        sh4_emit16(0x7000 | (reg_cycles << 8) |                              \
+                   ((u32)(-(s32)cycle_count) & 0xFF));                        \
+      } else {                                                                \
+        generate_load_imm(0, cycle_count);                                    \
+        sh4_emit16(0x3008 | (reg_cycles << 8) | (0 << 4));                   \
+      }                                                                       \
+      cycle_count = 0;                                                        \
+      sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                \
+      sh4_emit16(0x8900); /* bt placeholder */                                \
+      do {                                                                    \
+        u8 *_cyc_patch = translation_ptr - 2;                                 \
+        generate_load_reg(0, REG_PC);                                         \
+        sh4_emit16(0x4022 | (15 << 8));                                       \
+        generate_load_imm(1, (u32)sh4_update_gba);                            \
+        sh4_emit16(0x400B | (1 << 8));                                        \
+        sh4_emit16(0x0009);                                                    \
+        sh4_emit16(0x4026 | (15 << 8));                                       \
+        *(u16*)_cyc_patch = 0x8900 |                                          \
+          (((translation_ptr - _cyc_patch - 4) / 2) & 0xFF);                 \
+      } while(0);                                                             \
+    }                                                                         \
+  } while(0);                                                                 \
+  generate_load_reg(a0, REG_PC); /* reload target from saved PC */             \
   generate_indirect_branch_dual()
 
 #define generate_indirect_branch_no_cycle_update(type)                        \
@@ -742,8 +790,7 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
 #define generate_store_reg_pc_thumb(ireg, rd)                                 \
   generate_store_reg(ireg, rd);                                               \
   if(rd == 15) {                                                              \
-    if ((ireg) != a0) { generate_mov(a0, ireg); }                             \
-    generate_indirect_branch_cycle_update(thumb);                             \
+    generate_indirect_branch_exit_with_cycle();                               \
   }
 
 /* ---- Branch ---- */
@@ -1410,6 +1457,16 @@ void function_cc sh4_collapse_flags(void)
                   (reg[REG_CPSR] & 0xFF);
 }
 
+/* Extract flags from CPSR into separate slots. Called on entry to
+ * execute_arm_translate_internal so flags survive across frame boundaries. */
+void function_cc sh4_extract_flags(void)
+{
+  reg[REG_N_FLAG] = (reg[REG_CPSR] >> 31) & 1;
+  reg[REG_Z_FLAG] = (reg[REG_CPSR] >> 30) & 1;
+  reg[REG_C_FLAG] = (reg[REG_CPSR] >> 29) & 1;
+  reg[REG_V_FLAG] = (reg[REG_CPSR] >> 28) & 1;
+}
+
 /* ---- SWI and execute helpers ---- */
 static void function_cc execute_swi(u32 pc)
 {
@@ -1467,7 +1524,7 @@ u32 execute_spsr_restore(u32 address)
 
 /* ---- ARM branches ---- */
 #define arm_conditional_block_header()                                        \
-  generate_cycle_update();                                                    \
+  generate_cycle_update_and_check();                                          \
   generate_condition(a0);
 
 #define arm_b()            generate_branch()
@@ -1630,7 +1687,7 @@ u32 execute_spsr_restore(u32 address)
   thumb_decode_##decode_type();                                               \
   generate_shift_load_operands_##value_type();                                \
   thumb_shift_operation_##value_type(op_type);                                \
-  generate_store_reg(rv, rd);                                                 \
+  generate_store_reg(a0, rd);                                                 \
 }
 
 /* Thumb memory */
@@ -1706,8 +1763,7 @@ u32 execute_spsr_restore(u32 address)
   generate_load_pc(a1, pc);                                                   \
   generate_function_call(execute_load_u32);                                   \
   generate_store_reg(rv, REG_PC);                                             \
-  generate_mov(a0, rv); /* a0 = loaded PC (rv/a0 differ on SH4) */            \
-  generate_indirect_branch_cycle_update(thumb)
+  generate_indirect_branch_exit_with_cycle()
 
 #define thumb_block_memory_extra_push_lr(base_reg)                            \
   generate_load_reg(a0, REG_SAVE3);                                           \
@@ -1770,7 +1826,7 @@ u32 execute_spsr_restore(u32 address)
 /* Thumb branches */
 #define thumb_conditional_branch(condition)                                   \
 {                                                                             \
-  generate_cycle_update();                                                    \
+  generate_cycle_update_and_check();                                          \
   generate_condition_##condition(a0);                                         \
   generate_branch_no_cycle_update(                                            \
    block_exits[block_exit_position].branch_source,                            \
@@ -1835,8 +1891,11 @@ u32 function_cc execute_arm_translate_internal(u32 cycles, void *regptr);
 
 u32 execute_arm_translate(u32 cycles) {
 #ifdef SH4_DYNAREC_DEBUG
-  printf("[ENTRY] execute_arm_translate: REG_PC=0x%08x CPSR=0x%08x mode=%u\n",
-         reg[REG_PC], reg[REG_CPSR], reg[CPU_MODE]);
+  { static int _ec = 0;
+    _ec++;
+    if (_ec <= 10 || (_ec % 60) == 0)
+      printf("[FRAME %d] PC=%08x cycles=%u\n", _ec, reg[REG_PC], cycles);
+  }
 #endif
   return execute_arm_translate_internal(cycles, &reg[0]);
 }
