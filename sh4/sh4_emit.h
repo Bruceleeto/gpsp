@@ -898,14 +898,33 @@ void function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_ma
     generate_rrx_flags(ireg);                                                 \
   }
 
-#define generate_asr_no_flags_reg(ireg)   sh4_emit16(0x0009)
-#define generate_asr_flags_reg(ireg)      sh4_emit16(0x0009)
-#define generate_lsl_no_flags_reg(ireg)   sh4_emit16(0x0009)
-#define generate_lsl_flags_reg(ireg)      sh4_emit16(0x0009)
-#define generate_lsr_no_flags_reg(ireg)   sh4_emit16(0x0009)
-#define generate_lsr_flags_reg(ireg)      sh4_emit16(0x0009)
-#define generate_ror_no_flags_reg(ireg)   sh4_emit16(0x0009)
-#define generate_ror_flags_reg(ireg)      sh4_emit16(0x0009)
+/* Register-based shifts: shift amount already in a1.
+ * generate_shift_*_var does the actual SH4 shift instruction.
+ * _flags variants also update flags after the shift. */
+#define generate_lsl_no_flags_reg(ireg)   generate_shift_left_var(ireg)
+#define generate_lsr_no_flags_reg(ireg)   generate_shift_right_var(ireg)
+#define generate_asr_no_flags_reg(ireg)   generate_shift_right_arithmetic_var(ireg)
+#define generate_ror_no_flags_reg(ireg)   generate_rotate_right_var(ireg)
+
+#define generate_lsl_flags_reg(ireg)                                          \
+  generate_shift_left_var(ireg);                                              \
+  generate_or(ireg, ireg);                                                    \
+  update_logical_flags()
+
+#define generate_lsr_flags_reg(ireg)                                          \
+  generate_shift_right_var(ireg);                                             \
+  generate_or(ireg, ireg);                                                    \
+  update_logical_flags()
+
+#define generate_asr_flags_reg(ireg)                                          \
+  generate_shift_right_arithmetic_var(ireg);                                  \
+  generate_or(ireg, ireg);                                                    \
+  update_logical_flags()
+
+#define generate_ror_flags_reg(ireg)                                          \
+  generate_rotate_right_var(ireg);                                            \
+  generate_or(ireg, ireg);                                                    \
+  update_logical_flags()
 
 #define generate_rrx_flags(ireg)                                              \
   generate_load_imm(a2, 0xffffffff);                                          \

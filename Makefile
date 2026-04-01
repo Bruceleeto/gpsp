@@ -18,7 +18,7 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   +=  -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
+   CFLAGS   += -O3 -flto -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
    LIBS     := -lm -lSDL
 else

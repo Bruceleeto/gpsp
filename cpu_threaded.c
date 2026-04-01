@@ -2672,11 +2672,6 @@ u8 function_cc *block_lookup_address_dual(u32 pc)
 u8 function_cc *block_lookup_address_arm(u32 pc)
 {
   unsigned i;
-#ifdef SH4_ARCH
-  /* Mask BIOS mirrors to canonical range (stub also does this at runtime) */
-  if (pc < 0x02000000 && pc >= 0x00004000)
-    pc &= 0x3FFF;
-#endif
 #ifdef SH4_DYNAREC_DEBUG
   sh4_validate_regs(pc);
 #endif
@@ -2697,10 +2692,6 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
 u8 function_cc *block_lookup_address_thumb(u32 pc)
 {
   unsigned i;
-#ifdef SH4_ARCH
-  if (pc < 0x02000000 && pc >= 0x00004000)
-    pc &= 0x3FFF;
-#endif
   for (i = 0; i < 4; i++) {
     u8 *ret = block_lookup_translate_thumb(pc);
     if (ret && ret != (u8*)(~0)) {

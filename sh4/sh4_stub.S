@@ -78,14 +78,6 @@ defsymbl(execute_arm_translate_internal)
 
 lookup_pc:
     mov.l   @(REG_PC, r8), r4     /* r4 = PC */
-    /* Mask BIOS mirror: if PC < 0x02000000, mask to 0x3FFF */
-    mov.l   bios_limit, r0
-    cmp/hs  r0, r4                 /* T = (r4 >= 0x02000000) */
-    bt      1f                     /* skip mask if not in BIOS range */
-    mov.w   bios_mask, r0
-    and     r0, r4
-    mov.l   r4, @(REG_PC, r8)     /* write back masked PC */
-1:
     /* Check CPSR thumb bit to decide ARM vs Thumb lookup */
     mov     #REG_CPSR, r0
     mov.l   @(r0, r8), r1
@@ -120,11 +112,6 @@ lookup_arm:
     .align 2
 extract_flags_addr:
     .long   _sh4_extract_flags
-bios_limit:
-    .long   0x02000000
-bios_mask:
-    .word   0x3FFF
-    .align 2
 lookup_arm_addr:
     .long   _block_lookup_address_arm
 lookup_pc_lit:
