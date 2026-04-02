@@ -71,9 +71,33 @@ static pvr_ptr_t pvr_txr;
 static void *pvr_txr_sq;
 static u32 dc_key_state = 0;
 
-static frameskip_type current_frameskip_type = auto_frameskip;
-static u32 frameskip_value = 4;
+static frameskip_type current_frameskip_type = no_frameskip;
+static u32 frameskip_value = 1;
 static u32 frameskip_counter = 0;
+
+/* ---- DC audio via snd_stream ---- */
+#include <dc/sound/sound.h>
+#include <dc/sound/stream.h>
+
+static snd_stream_hnd_t dc_snd_hnd = SND_STREAM_INVALID;
+static s16 dc_snd_buf[16384] __attribute__((aligned(32)));
+
+static void *dc_snd_callback(snd_stream_hnd_t hnd, int bytes_req, int *bytes_recv)
+{
+   (void)hnd;
+   /* bytes_req is in bytes. stereo s16 = 4 bytes per frame */
+   u32 frames = bytes_req / 4;
+   if (frames > sizeof(dc_snd_buf) / 4)
+      frames = sizeof(dc_snd_buf) / 4;
+
+   u32 produced = sound_read_samples(dc_snd_buf, frames);
+
+   if (produced < frames)
+      memset(dc_snd_buf + produced * 2, 0, (frames - produced) * 2 * sizeof(s16));
+
+   *bytes_recv = frames * 4;
+   return dc_snd_buf;
+}
 
 static int16_t dc_input_state_cb(unsigned port, unsigned device,
                                   unsigned index, unsigned id)
@@ -118,27 +142,35 @@ static void dc_poll_input(void)
    if (state->rtrig > 16)                dc_key_state |= BUTTON_R;
 }
 
-static void dc_present_frame(void)
+/* Pre-computed PVR header — built once at init, reused every frame */
+static pvr_poly_hdr_t dc_poly_hdr;
+static float dc_u_max, dc_v_max;
+
+static void dc_init_pvr_state(void)
 {
-   sq_cpy(pvr_txr_sq, gba_screen_pixels,
-          GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * sizeof(u16));
-
-   pvr_scene_begin();
-   pvr_list_begin(PVR_LIST_OP_POLY);
-
    pvr_poly_cxt_t cxt;
-   pvr_poly_hdr_t hdr;
-   pvr_vertex_t vert;
-
    pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
       PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
       PVR_TEX_W, PVR_TEX_H, pvr_txr, PVR_FILTER_NONE);
-   pvr_poly_compile(&hdr, &cxt);
-   pvr_prim(&hdr, sizeof(hdr));
+   pvr_poly_compile(&dc_poly_hdr, &cxt);
+   dc_u_max = (float)GBA_SCREEN_WIDTH / PVR_TEX_W;
+   dc_v_max = (float)GBA_SCREEN_HEIGHT / PVR_TEX_H;
+}
 
-   float u_max = (float)GBA_SCREEN_WIDTH / PVR_TEX_W;
-   float v_max = (float)GBA_SCREEN_HEIGHT / PVR_TEX_H;
+static void dc_submit_frame(void)
+{
+   /* Upload framebuffer to VRAM */
+   sq_cpy(pvr_txr_sq, gba_screen_pixels,
+          GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * sizeof(u16));
 
+   /* Wait for PVR to finish previous frame, then submit new one */
+   pvr_wait_ready();
+   pvr_scene_begin();
+   pvr_list_begin(PVR_LIST_OP_POLY);
+
+   pvr_prim(&dc_poly_hdr, sizeof(dc_poly_hdr));
+
+   pvr_vertex_t vert;
    vert.argb = PVR_PACK_COLOR(1.0f, 1.0f, 1.0f, 1.0f);
    vert.oargb = 0;
    vert.flags = PVR_CMD_VERTEX;
@@ -148,20 +180,20 @@ static void dc_present_frame(void)
    pvr_prim(&vert, sizeof(vert));
 
    vert.x = 640.0f; vert.y = 0.0f;
-   vert.u = u_max;  vert.v = 0.0f;
+   vert.u = dc_u_max; vert.v = 0.0f;
    pvr_prim(&vert, sizeof(vert));
 
    vert.x = 0.0f;   vert.y = 480.0f;
-   vert.u = 0.0f;   vert.v = v_max;
+   vert.u = 0.0f;   vert.v = dc_v_max;
    pvr_prim(&vert, sizeof(vert));
 
    vert.flags = PVR_CMD_VERTEX_EOL;
    vert.x = 640.0f; vert.y = 480.0f;
-   vert.u = u_max;  vert.v = v_max;
+   vert.u = dc_u_max; vert.v = dc_v_max;
    pvr_prim(&vert, sizeof(vert));
 
    pvr_list_finish();
-   pvr_scene_finish();
+   pvr_scene_finish();  /* Non-blocking — PVR renders while we emulate next frame */
 }
 
 /* ========================================================================= */
@@ -299,6 +331,11 @@ int main(int argc, char *argv[])
    pvr_init_defaults();
    pvr_txr = pvr_mem_malloc(PVR_TEX_W * PVR_TEX_H * sizeof(u16));
    pvr_txr_sq = (void *)(((uintptr_t)pvr_txr & 0xFFFFFF) | PVR_TA_TEX_MEM);
+   dc_init_pvr_state();
+
+   /* ---- DC audio ---- */
+   snd_stream_init();
+   dc_snd_hnd = snd_stream_alloc(dc_snd_callback, SND_STREAM_BUFFER_MAX);
 #else
    /* ---- SDL init ---- */
    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
@@ -405,6 +442,14 @@ int main(int argc, char *argv[])
    /* Reset GBA */
    reset_gba();
 
+#ifdef DREAMCAST
+   if (dc_snd_hnd != SND_STREAM_INVALID)
+      snd_stream_start(dc_snd_hnd, GBA_SOUND_FREQUENCY, 1);
+#else
+   /* Start audio playback */
+   SDL_PauseAudio(0);
+#endif
+
    /* ---- Main loop ---- */
 #ifdef DREAMCAST
    {
@@ -431,7 +476,10 @@ int main(int argc, char *argv[])
          }
 
          if (!skip_next_frame)
-            dc_present_frame();
+            dc_submit_frame();
+
+         if (dc_snd_hnd != SND_STREAM_INVALID)
+            snd_stream_poll(dc_snd_hnd);
 
          virtual_ticks += frame_ms;
          u32 now = (u32)timer_ms_gettime64();
@@ -476,12 +524,15 @@ int main(int argc, char *argv[])
 
       if (pvr_txr)
          pvr_mem_free(pvr_txr);
+      if (dc_snd_hnd != SND_STREAM_INVALID)
+      {
+         snd_stream_stop(dc_snd_hnd);
+         snd_stream_destroy(dc_snd_hnd);
+      }
+      snd_stream_shutdown();
       pvr_shutdown();
    }
 #else
-   /* Start audio playback */
-   SDL_PauseAudio(0);
-
    Uint32 frame_ms   = (Uint32)(1000.0f / GBA_FPS);
    Uint32 last_ticks = SDL_GetTicks();
 

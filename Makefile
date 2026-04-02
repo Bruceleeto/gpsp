@@ -1,6 +1,6 @@
 # gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= DC
+PLATFORM ?= LINUX
 
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
@@ -34,8 +34,8 @@ else
    endif
 
    ARCH_FLAGS := -m32
-   CFLAGS  += $(ARCH_FLAGS) $(SDL_CFLAGS)
-   LDFLAGS += $(ARCH_FLAGS)
+   CFLAGS  += $(ARCH_FLAGS) $(SDL_CFLAGS) -pg -g
+   LDFLAGS += $(ARCH_FLAGS) -pg
 endif
 
 INCFLAGS := -I$(CORE_DIR)

@@ -232,56 +232,72 @@ static inline void render_tile_Nbpp(
   if (tile & 0x800)
     tile_ptr += vertical_pixel_flip;
 
+  // Per-pixel helpers with constant shift amounts (no variable shifts)
+  #define PIX_8BPP(sh) do { \
+    u8 pval = (tilepix >> (sh)) & 0xFF; \
+    if (pval) { \
+      if (rdtype == FULLCOLOR) *dest_ptr = paltbl[pval]; \
+      else if (rdtype == INDXCOLOR) *dest_ptr = pval | px_comb; \
+      else if (rdtype == STCKCOLOR) *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16); \
+    } else if (isbase) { \
+      *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb; \
+    } \
+    dest_ptr++; \
+  } while(0)
+
+  #define PIX_4BPP(sh) do { \
+    u8 pval = (tilepix >> (sh)) & 0xF; \
+    if (pval) { \
+      if (rdtype == FULLCOLOR) *dest_ptr = subpal[pval]; \
+      else if (rdtype == INDXCOLOR) *dest_ptr = pxflg | pval; \
+      else if (rdtype == STCKCOLOR) *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16); \
+    } else if (isbase) { \
+      *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb; \
+    } \
+    dest_ptr++; \
+  } while(0)
+
+  #define FILL_BG_4 do { \
+    for (u32 _i = 0; _i < 4; _i++, dest_ptr++) \
+      if (isbase) *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb; \
+  } while(0)
+
   if (is8bpp) {
-    for (u32 j = 0; j < 2; j++) {
-      u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
-      if (tilepix) {
-        for (u32 i = 0; i < 4; i++, dest_ptr++) {
-          u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
-          if (pval) {
-            if (rdtype == FULLCOLOR)
-              *dest_ptr = paltbl[pval];
-            else if (rdtype == INDXCOLOR)
-              *dest_ptr = pval | px_comb;  // Add combine flags
-            else if (rdtype == STCKCOLOR)
-              *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
-          }
-          else if (isbase) {
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
-          }
-        }
-      } else {
-        for (u32 i = 0; i < 4; i++, dest_ptr++)
-          if (isbase)
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
-      }
-    }
+    // Word 0 (or 1 if hflipped)
+    u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1 : 0]);
+    if (tilepix) {
+      if (hflip) { PIX_8BPP(24); PIX_8BPP(16); PIX_8BPP(8); PIX_8BPP(0); }
+      else       { PIX_8BPP(0); PIX_8BPP(8); PIX_8BPP(16); PIX_8BPP(24); }
+    } else { FILL_BG_4; }
+
+    // Word 1 (or 0 if hflipped)
+    tilepix = eswap32(((u32*)tile_ptr)[hflip ? 0 : 1]);
+    if (tilepix) {
+      if (hflip) { PIX_8BPP(24); PIX_8BPP(16); PIX_8BPP(8); PIX_8BPP(0); }
+      else       { PIX_8BPP(0); PIX_8BPP(8); PIX_8BPP(16); PIX_8BPP(24); }
+    } else { FILL_BG_4; }
   } else {
     u32 tilepix = eswap32(*(u32*)tile_ptr);
-    if (tilepix) {  // We can skip it all if the row is transparent
+    if (tilepix) {
       u16 tilepal = (tile >> 12) << 4;
       u16 pxflg = px_comb | tilepal;
       const u16 *subpal = &paltbl[tilepal];
-      for (u32 i = 0; i < 8; i++, dest_ptr++) {
-        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
-        if (pval) {
-          if (rdtype == FULLCOLOR)
-            *dest_ptr = subpal[pval];
-          else if (rdtype == INDXCOLOR)
-            *dest_ptr = pxflg | pval;
-          else if (rdtype == STCKCOLOR)
-            *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
-        }
-        else if (isbase) {
-          *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
-        }
+      if (hflip) {
+        PIX_4BPP(28); PIX_4BPP(24); PIX_4BPP(20); PIX_4BPP(16);
+        PIX_4BPP(12); PIX_4BPP(8);  PIX_4BPP(4);  PIX_4BPP(0);
+      } else {
+        PIX_4BPP(0);  PIX_4BPP(4);  PIX_4BPP(8);  PIX_4BPP(12);
+        PIX_4BPP(16); PIX_4BPP(20); PIX_4BPP(24); PIX_4BPP(28);
       }
     } else if (isbase) {
-      // In this case we simply fill the pixels with background pixels
       for (u32 i = 0; i < 8; i++, dest_ptr++)
         *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
     }
   }
+
+  #undef PIX_8BPP
+  #undef PIX_4BPP
+  #undef FILL_BG_4
 }
 
 

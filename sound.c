@@ -62,7 +62,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   s16 current_sample, next_sample;
 
   current_sample = ds->fifo[ds->fifo_base] * 16;
-  ds->fifo_base = (ds->fifo_base + 1) % 32;
+  ds->fifo_base = (ds->fifo_base + 1) & 31;
   next_sample = ds->fifo[ds->fifo_base] * 16;
 
   if(sound_on == 1)
@@ -85,7 +85,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
         while(fifo_fractional <= 0xFFFFFF)
         {
            fifo_fractional += frequency_step;
-           buffer_index = (buffer_index + 2) % BUFFER_SIZE;
+           buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;
         }
         break;
 
@@ -99,7 +99,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
            sound_buffer[buffer_index + 1]     += dest_sample;
 
            fifo_fractional += frequency_step;
-           buffer_index = (buffer_index + 2) % BUFFER_SIZE;
+           buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;
         }
         break;
 
@@ -113,7 +113,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
            sound_buffer[buffer_index]     += dest_sample;
 
            fifo_fractional += frequency_step;
-           buffer_index = (buffer_index + 2) % BUFFER_SIZE;
+           buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;
         }
         break;
 
@@ -127,7 +127,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
            sound_buffer[buffer_index]     += dest_sample;
            sound_buffer[buffer_index + 1] += dest_sample;
            fifo_fractional += frequency_step;
-           buffer_index = (buffer_index + 2) % BUFFER_SIZE;
+           buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;
         }
         break;
   }
@@ -135,7 +135,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   ds->buffer_index = buffer_index;
   ds->fifo_fractional = fp8_24_fractional_part(fifo_fractional);
 
-  if(((ds->fifo_top - ds->fifo_base) % 32) <= 16)
+  if(((ds->fifo_top - ds->fifo_base) & 31) <= 16)
   {
     if(dma[1].direct_sound_channel == channel)
       gba_dma_transfer(1, &ret);
@@ -329,11 +329,11 @@ u32 gbc_sound_master_volume;
   for(i = 0; i < buffer_ticks; i++)                                           \
   {                                                                           \
     current_sample =                                                          \
-     sample_data[fp16_16_to_u32(sample_index) % sample_length];               \
+     sample_data[fp16_16_to_u32(sample_index) & (sample_length - 1)];               \
     gbc_sound_render_sample_##type();                                         \
                                                                               \
     sample_index += frequency_step;                                           \
-    buffer_index = (buffer_index + 2) % BUFFER_SIZE;                          \
+    buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;                          \
                                                                               \
     update_tone_counters(envelope_op, sweep_op);                              \
   }                                                                           \
@@ -363,7 +363,7 @@ u32 gbc_sound_master_volume;
     if(sample_index >= u32_to_fp16_16(gbc_noise_wrap_##noise_type))           \
       sample_index -= u32_to_fp16_16(gbc_noise_wrap_##noise_type);            \
                                                                               \
-    buffer_index = (buffer_index + 2) % BUFFER_SIZE;                          \
+    buffer_index = (buffer_index + 2) & BUFFER_SIZE_MASK;                          \
     update_tone_counters(envelope_op, sweep_op);                              \
   }                                                                           \
 
@@ -500,7 +500,7 @@ void render_gbc_sound()
 
   gbc_sound_last_cpu_ticks = cpu_ticks;
   gbc_sound_buffer_index =
-   (gbc_sound_buffer_index + (buffer_ticks * 2)) % BUFFER_SIZE;
+   (gbc_sound_buffer_index + (buffer_ticks * 2)) & BUFFER_SIZE_MASK;
 }
 
 // Special thanks to blarrg for the LSFR frequency used in Meridian, as posted
