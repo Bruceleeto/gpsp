@@ -1,11 +1,10 @@
-# gpSP standalone SDL 1.2 build
+# gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= DC
+PLATFORM ?= LINUX
 
-HAVE_DYNAREC ?= 1
+HAVE_DYNAREC ?= 0
 OVERCLOCK_60FPS ?= 0
-MMAP_JIT_CACHE ?= 0
-SH4_DEBUG ?= 1
+SH4_DEBUG ?= 0
 
 TARGET   := gpsp
 BUILDDIR := obj
@@ -18,48 +17,24 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   += -O3 -fno-lto  -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
+   CFLAGS   += -O3 -flto -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
-   LIBS     := -lm -lSDL
+   LIBS     := -lm
 else
    CC       ?= gcc
    CXX      ?= g++
-   FORCE_32BIT ?= 1
+   CPU_ARCH := x86_32
 
    SDL_CFLAGS  := $(shell sdl-config --cflags 2>/dev/null)
    SDL_LDFLAGS := $(shell sdl-config --libs 2>/dev/null)
    LIBS     := $(SDL_LDFLAGS) -lm
 
-   # Dynarec needs mmap JIT cache on Linux/Mac
    ifeq ($(HAVE_DYNAREC),1)
       MMAP_JIT_CACHE = 1
    endif
 
-   # CPU architecture detection
-   ifeq ($(HAVE_DYNAREC),1)
-      UNAME_M := $(shell uname -m)
-      ifeq ($(CPU_ARCH),)
-         ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
-            CPU_ARCH := x86_32
-            FORCE_32BIT := 1
-         else ifneq (,$(filter i386 i686,$(UNAME_M)))
-            CPU_ARCH := x86_32
-         else ifneq (,$(filter aarch64 arm64,$(UNAME_M)))
-            CPU_ARCH := arm64
-         else ifneq (,$(filter armv%,$(UNAME_M)))
-            CPU_ARCH := arm
-         else ifneq (,$(filter mips%,$(UNAME_M)))
-            CPU_ARCH := mips
-         endif
-      endif
-   endif
-
-   ifeq ($(FORCE_32BIT),1)
-      CFLAGS  += -m32
-      LDFLAGS += -m32
-   endif
-
-   CFLAGS += $(SDL_CFLAGS)
+   CFLAGS  += -m32 $(SDL_CFLAGS)
+   LDFLAGS += -m32
 endif
 
 INCFLAGS := -I$(CORE_DIR)
@@ -88,18 +63,11 @@ ifeq ($(HAVE_DYNAREC), 1)
    SOURCES_C += $(CORE_DIR)/cpu_threaded.c
    ifeq ($(CPU_ARCH), x86_32)
       SOURCES_ASM += $(CORE_DIR)/x86/x86_stub.S
-   else ifeq ($(CPU_ARCH), arm)
-      SOURCES_ASM += $(CORE_DIR)/arm/arm_stub.S
-   else ifeq ($(CPU_ARCH), arm64)
-      SOURCES_ASM += $(CORE_DIR)/arm/arm64_stub.S
-   else ifeq ($(CPU_ARCH), mips)
-      SOURCES_ASM += $(CORE_DIR)/mips/mips_stub.S
    else ifeq ($(CPU_ARCH), sh4)
       SOURCES_ASM += $(CORE_DIR)/sh4/sh4_stub.S
    endif
 endif
 
- 
 DEFINES := -DHAVE_STRINGS_H -DHAVE_STDINT_H -DHAVE_INTTYPES_H -DINLINE=inline -Wall
 
 ifeq ($(HAVE_DYNAREC), 1)
@@ -115,13 +83,7 @@ ifeq ($(SH4_DEBUG), 1)
    DEFINES += -DSH4_DYNAREC_DEBUG -DSH4_DYNAREC_HEXDUMP
 endif
 
-ifeq ($(CPU_ARCH), arm)
-   DEFINES += -DARM_ARCH
-else ifeq ($(CPU_ARCH), arm64)
-   DEFINES += -DARM64_ARCH
-else ifeq ($(CPU_ARCH), mips)
-   DEFINES += -DMIPS_ARCH
-else ifeq ($(CPU_ARCH), x86_32)
+ifeq ($(CPU_ARCH), x86_32)
    DEFINES += -DX86_ARCH
 else ifeq ($(CPU_ARCH), sh4)
    DEFINES += -DSH4_ARCH

@@ -1,12 +1,22 @@
-/* gpSP standalone SDL 1.2 frontend
+/* gpSP standalone frontend
  *
- * Built-in SDL backend handling video, audio, and input.
+ * Dreamcast: PVR rendering, maple input, KOS timer
+ * Linux:     SDL 1.2 video/audio/input
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef DREAMCAST
+#include <kos.h>
+#include <dc/pvr.h>
+#include <dc/sq.h>
+#include <dc/maple.h>
+#include <dc/maple/controller.h>
+#else
 #include <SDL/SDL.h>
+#endif
 
 #include "common.h"
 #include "gba_memory.h"
@@ -15,9 +25,6 @@
 
 /* Usually ~59.73 Hz */
 #define GBA_FPS (((float)GBC_BASE_RATE) / (308 * 228 * 4))
-
-#define SCREEN_WIDTH  640
-#define SCREEN_HEIGHT 480
 
 /* ---- Globals the core expects ---- */
 u32 skip_next_frame = 0;
@@ -50,10 +57,122 @@ void set_fastforward_override(bool fastforward)
    (void)fastforward;
 }
 
-/* ---- SDL state ---- */
-static SDL_Surface *screen = NULL;
-
 static int running = 1;
+
+/* ========================================================================= */
+#ifdef DREAMCAST
+/* Dreamcast: PVR + Maple                                                    */
+/* ========================================================================= */
+
+#define PVR_TEX_W 256
+#define PVR_TEX_H 256
+
+static pvr_ptr_t pvr_txr;
+static void *pvr_txr_sq;
+static u32 dc_key_state = 0;
+
+static frameskip_type current_frameskip_type = auto_frameskip;
+static u32 frameskip_value = 4;
+static u32 frameskip_counter = 0;
+
+static int16_t dc_input_state_cb(unsigned port, unsigned device,
+                                  unsigned index, unsigned id)
+{
+   (void)device; (void)index;
+   if (port != 0)
+      return 0;
+
+   switch (id)
+   {
+      case BUTTON_ID_A:      return (dc_key_state & BUTTON_A)      ? 1 : 0;
+      case BUTTON_ID_B:      return (dc_key_state & BUTTON_B)      ? 1 : 0;
+      case BUTTON_ID_SELECT: return (dc_key_state & BUTTON_SELECT) ? 1 : 0;
+      case BUTTON_ID_START:  return (dc_key_state & BUTTON_START)  ? 1 : 0;
+      case BUTTON_ID_RIGHT:  return (dc_key_state & BUTTON_RIGHT)  ? 1 : 0;
+      case BUTTON_ID_LEFT:   return (dc_key_state & BUTTON_LEFT)   ? 1 : 0;
+      case BUTTON_ID_UP:     return (dc_key_state & BUTTON_UP)     ? 1 : 0;
+      case BUTTON_ID_DOWN:   return (dc_key_state & BUTTON_DOWN)   ? 1 : 0;
+      case BUTTON_ID_R:      return (dc_key_state & BUTTON_R)      ? 1 : 0;
+      case BUTTON_ID_L:      return (dc_key_state & BUTTON_L)      ? 1 : 0;
+      default: return 0;
+   }
+}
+
+static void dc_poll_input(void)
+{
+   maple_device_t *cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+   if (!cont) return;
+   cont_state_t *state = (cont_state_t *)maple_dev_status(cont);
+   if (!state) return;
+
+   dc_key_state = 0;
+   if (state->buttons & CONT_A)          dc_key_state |= BUTTON_A;
+   if (state->buttons & CONT_B)          dc_key_state |= BUTTON_B;
+   if (state->buttons & CONT_START)      dc_key_state |= BUTTON_START;
+   if (state->buttons & CONT_Y)          dc_key_state |= BUTTON_SELECT;
+   if (state->buttons & CONT_DPAD_UP)    dc_key_state |= BUTTON_UP;
+   if (state->buttons & CONT_DPAD_DOWN)  dc_key_state |= BUTTON_DOWN;
+   if (state->buttons & CONT_DPAD_LEFT)  dc_key_state |= BUTTON_LEFT;
+   if (state->buttons & CONT_DPAD_RIGHT) dc_key_state |= BUTTON_RIGHT;
+   if (state->ltrig > 16)                dc_key_state |= BUTTON_L;
+   if (state->rtrig > 16)                dc_key_state |= BUTTON_R;
+}
+
+static void dc_present_frame(void)
+{
+   sq_cpy(pvr_txr_sq, gba_screen_pixels,
+          GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * sizeof(u16));
+
+   pvr_scene_begin();
+   pvr_list_begin(PVR_LIST_OP_POLY);
+
+   pvr_poly_cxt_t cxt;
+   pvr_poly_hdr_t hdr;
+   pvr_vertex_t vert;
+
+   pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
+      PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
+      PVR_TEX_W, PVR_TEX_H, pvr_txr, PVR_FILTER_NONE);
+   pvr_poly_compile(&hdr, &cxt);
+   pvr_prim(&hdr, sizeof(hdr));
+
+   float u_max = (float)GBA_SCREEN_WIDTH / PVR_TEX_W;
+   float v_max = (float)GBA_SCREEN_HEIGHT / PVR_TEX_H;
+
+   vert.argb = PVR_PACK_COLOR(1.0f, 1.0f, 1.0f, 1.0f);
+   vert.oargb = 0;
+   vert.flags = PVR_CMD_VERTEX;
+
+   vert.x = 0.0f;   vert.y = 0.0f;   vert.z = 1.0f;
+   vert.u = 0.0f;   vert.v = 0.0f;
+   pvr_prim(&vert, sizeof(vert));
+
+   vert.x = 640.0f; vert.y = 0.0f;
+   vert.u = u_max;  vert.v = 0.0f;
+   pvr_prim(&vert, sizeof(vert));
+
+   vert.x = 0.0f;   vert.y = 480.0f;
+   vert.u = 0.0f;   vert.v = v_max;
+   pvr_prim(&vert, sizeof(vert));
+
+   vert.flags = PVR_CMD_VERTEX_EOL;
+   vert.x = 640.0f; vert.y = 480.0f;
+   vert.u = u_max;  vert.v = v_max;
+   pvr_prim(&vert, sizeof(vert));
+
+   pvr_list_finish();
+   pvr_scene_finish();
+}
+
+/* ========================================================================= */
+#else
+/* Linux: SDL 1.2                                                            */
+/* ========================================================================= */
+
+#define SCREEN_WIDTH  640
+#define SCREEN_HEIGHT 480
+
+static SDL_Surface *screen = NULL;
 static u32 sdl_key_state = 0;
 
 /* ---- Scale GBA framebuffer to screen ---- */
@@ -165,12 +284,22 @@ static void sdl_poll_input(void)
    }
 }
 
-/* ---- Main ---- */
+#endif /* DREAMCAST */
+
+/* ========================================================================= */
+/* Main                                                                      */
+/* ========================================================================= */
+
 int main(int argc, char *argv[])
 {
    const char *rom_path  = (argc > 1) ? argv[1] : "pc/assets/test.bin";
    const char *bios_path = (argc > 2) ? argv[2] : NULL;
 
+#ifdef DREAMCAST
+   pvr_init_defaults();
+   pvr_txr = pvr_mem_malloc(PVR_TEX_W * PVR_TEX_H * sizeof(u16));
+   pvr_txr_sq = (void *)(((uintptr_t)pvr_txr & 0xFFFFFF) | PVR_TA_TEX_MEM);
+#else
    /* ---- SDL init ---- */
    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
    {
@@ -201,6 +330,7 @@ int main(int argc, char *argv[])
 
    if (SDL_OpenAudio(&want, NULL) < 0)
       fprintf(stderr, "SDL audio failed: %s\n", SDL_GetError());
+#endif
 
    /* ---- Emulator init ---- */
 #if defined(HAVE_DYNAREC) && defined(MMAP_JIT_CACHE)
@@ -258,21 +388,100 @@ int main(int argc, char *argv[])
                     SERIAL_MODE_AUTO) != 0)
    {
       fprintf(stderr, "Failed to load ROM: %s\n", rom_path);
+#ifndef DREAMCAST
       SDL_Quit();
+#endif
       return 1;
    }
    printf("Loaded ROM: %s\n", rom_path);
 
    /* Wire up input */
+#ifdef DREAMCAST
+   set_input_state(dc_input_state_cb);
+#else
    set_input_state(sdl_input_state_cb);
+#endif
 
    /* Reset GBA */
    reset_gba();
 
+   /* ---- Main loop ---- */
+#ifdef DREAMCAST
+   {
+      u32 frame_ms      = (u32)(1000.0f / GBA_FPS);
+      u32 virtual_ticks = (u32)timer_ms_gettime64() + frame_ms;
+      u32 fps_counter   = 0;
+      u32 skip_counter  = 0;
+      u32 fps_last      = (u32)timer_ms_gettime64();
+
+      while (running)
+      {
+         dc_poll_input();
+         update_input();
+         rumble_frame_reset();
+
+#ifdef HAVE_DYNAREC
+         if (dynarec_enable)
+            execute_arm_translate(execute_cycles);
+         else
+#endif
+         {
+            clear_gamepak_stickybits();
+            execute_arm(execute_cycles);
+         }
+
+         if (!skip_next_frame)
+            dc_present_frame();
+
+         virtual_ticks += frame_ms;
+         u32 now = (u32)timer_ms_gettime64();
+         if (current_frameskip_type == auto_frameskip)
+         {
+            if (now < virtual_ticks || num_skipped_frames >= frameskip_value)
+            {
+               skip_next_frame = 0;
+               num_skipped_frames = 0;
+            }
+            else
+            {
+               skip_next_frame = 1;
+               num_skipped_frames++;
+            }
+         }
+         else if (current_frameskip_type == fixed_interval_frameskip)
+         {
+            frameskip_counter = (frameskip_counter + 1) % (frameskip_value + 1);
+            skip_next_frame = (frameskip_counter != 0) ? 1 : 0;
+         }
+
+         fps_counter++;
+         if (skip_next_frame)
+            skip_counter++;
+
+         if (now - fps_last >= 10000)
+         {
+            u32 rendered = fps_counter - skip_counter;
+            float render_fps = rendered * 1000.0f / (now - fps_last);
+            float emu_fps = fps_counter * 1000.0f / (now - fps_last);
+            printf("render: %.1f fps  emu: %.1f fps  (%u/%u skipped)\n",
+                   render_fps, emu_fps, skip_counter, fps_counter);
+            fps_counter = 0;
+            skip_counter = 0;
+            fps_last = now;
+         }
+
+         if (now - virtual_ticks > frame_ms * 8)
+            virtual_ticks = now;
+      }
+
+      if (pvr_txr)
+         pvr_mem_free(pvr_txr);
+      pvr_shutdown();
+   }
+#else
    /* Start audio playback */
    SDL_PauseAudio(0);
 
-   /* ---- Main loop ---- */
    Uint32 frame_ms   = (Uint32)(1000.0f / GBA_FPS);
    Uint32 last_ticks = SDL_GetTicks();
 
@@ -308,6 +517,7 @@ int main(int argc, char *argv[])
    /* ---- Cleanup ---- */
    SDL_CloseAudio();
    SDL_Quit();
+#endif
 
    memory_term();
    free(gba_screen_pixels);
