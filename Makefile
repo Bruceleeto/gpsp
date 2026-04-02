@@ -1,10 +1,10 @@
 # gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= LINUX
+PLATFORM ?= DC
 
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
-SH4_DEBUG ?= 0
+SH4_DEBUG ?= 1
 
 TARGET   := gpsp
 BUILDDIR := obj
@@ -17,7 +17,7 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   += -O3 -flto -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
+   CFLAGS   += -O3  -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
    LIBS     := -lm
 else

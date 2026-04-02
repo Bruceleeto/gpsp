@@ -194,11 +194,13 @@ u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mas
 
 /* addc Rm, Rn -> Rn += Rm + T  (0x300E) */
 #define generate_adc(dest, src)                                               \
-  sh4_emit16(0x300E | ((dest) << 8) | ((src) << 4))
+  sh4_emit16(0x300E | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest); sh4_src_reg = (src); sh4_is_sub = 0
 
 /* subc Rm, Rn -> Rn -= Rm - T  (0x300A) */
 #define generate_sbb(dest, src)                                               \
-  sh4_emit16(0x300A | ((dest) << 8) | ((src) << 4))
+  sh4_emit16(0x300A | ((dest) << 8) | ((src) << 4));                          \
+  sh4_res_reg = (dest); sh4_src_reg = (src); sh4_is_sub = 1
 
 /* Load reg[ri] and add to src: src += reg[ri] */
 #define generate_add_memreg(src, ri)                                          \
@@ -395,6 +397,45 @@ static u32 function_cc sh4_ror_carry(u32 val, u32 amount) {
 static u32 function_cc sh4_rrx_carry(u32 val, u32 old_carry) {
   reg[REG_C_FLAG] = val & 1;
   return (val >> 1) | (old_carry ? 0x80000000u : 0);
+}
+
+/* ADC/SBC with full flag computation.
+ * These bypass the broken inline flag macros which can't handle 3-operand
+ * carry/overflow correctly. a0=operand2, a1=Rn for ADC; reversed for SBC. */
+static u32 function_cc sh4_adc_flags(u32 op2, u32 rn) {
+  u32 c_in = reg[REG_C_FLAG] & 1;
+  u64 result64 = (u64)rn + (u64)op2 + c_in;
+  u32 result = (u32)result64;
+  reg[REG_N_FLAG] = (result >> 31) & 1;
+  reg[REG_Z_FLAG] = (result == 0) ? 1 : 0;
+  reg[REG_C_FLAG] = (result64 >> 32) & 1;
+  reg[REG_V_FLAG] = ((~(rn ^ op2) & (rn ^ result)) >> 31) & 1;
+  return result;
+}
+
+static u32 function_cc sh4_sbc_flags(u32 op2, u32 rn) {
+  /* ARM SBC: Rd = Rn - Op2 - !C */
+  u32 not_c = (reg[REG_C_FLAG] & 1) ^ 1;
+  u64 result64 = (u64)rn - (u64)op2 - not_c;
+  u32 result = (u32)result64;
+  reg[REG_N_FLAG] = (result >> 31) & 1;
+  reg[REG_Z_FLAG] = (result == 0) ? 1 : 0;
+  /* ARM C = no borrow = (Rn >= Op2 + !C) */
+  reg[REG_C_FLAG] = (result64 <= 0xFFFFFFFFULL) ? 1 : 0;
+  reg[REG_V_FLAG] = (((rn ^ op2) & (rn ^ result)) >> 31) & 1;
+  return result;
+}
+
+static u32 function_cc sh4_rsc_flags(u32 op2, u32 rn) {
+  /* ARM RSC: Rd = Op2 - Rn - !C (reverse subtract with carry) */
+  u32 not_c = (reg[REG_C_FLAG] & 1) ^ 1;
+  u64 result64 = (u64)op2 - (u64)rn - not_c;
+  u32 result = (u32)result64;
+  reg[REG_N_FLAG] = (result >> 31) & 1;
+  reg[REG_Z_FLAG] = (result == 0) ? 1 : 0;
+  reg[REG_C_FLAG] = (result64 <= 0xFFFFFFFFULL) ? 1 : 0;
+  reg[REG_V_FLAG] = (((op2 ^ rn) & (op2 ^ result)) >> 31) & 1;
+  return result;
 }
 
 /* Emit: a0=value already loaded, set a1=shift_amount, call helper,
@@ -852,8 +893,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define generate_store_reg_pc_no_flags(ireg, reg_index)                       \
   generate_store_reg(ireg, reg_index);                                        \
   if(reg_index == 15) {                                                       \
-    generate_mov(a0, ireg);                                                   \
-    generate_indirect_branch_arm();                                           \
+    generate_exit_block();                                                    \
   }
 
 #define generate_store_reg_pc_flags(ireg, reg_index)                          \
@@ -1171,20 +1211,22 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define arm_data_proc_mul(rd, storefnc)     generate_multiply(a1); storefnc(a0, rd);
 #define arm_data_proc_muls(rd, storefnc)    generate_multiply(a1); generate_and(a0, a0); update_logical_flags(); storefnc(a0, rd);
 
+/* Set SH4 T = ARM C flag. shlr r0 shifts LSB into T. */
 #define load_c_flag(tmpreg)                                                   \
-  generate_load_imm(tmpreg, 0xffffffff);                                      \
-  generate_add_memreg(tmpreg, REG_C_FLAG);
+  generate_load_reg(0, REG_C_FLAG);                                           \
+  sh4_emit16(0x4001 | (0 << 8)); /* shlr r0: T = r0[0] = C */
 
+/* Set SH4 T = !ARM C flag. tst r0,r0 → T = (r0==0) = !C. */
 #define load_inv_c_flag(tmpreg)                                               \
-  generate_load_reg(tmpreg, REG_C_FLAG);                                      \
-  generate_sub_imm(tmpreg, 1);
+  generate_load_reg(0, REG_C_FLAG);                                           \
+  sh4_emit16(0x2008 | (0 << 8) | (0 << 4)); /* tst r0,r0: T = !C */
 
 #define arm_data_proc_adc(rd, storefnc)     load_c_flag(a2) generate_adc(a0, a1); storefnc(a0, rd);
-#define arm_data_proc_adcs(rd, storefnc)    load_c_flag(a2) generate_adc(a0, a1); update_add_flags(); storefnc(a0, rd);
+#define arm_data_proc_adcs(rd, storefnc)    generate_function_call(sh4_adc_flags); generate_mov(a0, rv); storefnc(a0, rd);
 #define arm_data_proc_sbc(rd, storefnc)     load_inv_c_flag(a2) generate_sbb(a1, a0); storefnc(a1, rd);
-#define arm_data_proc_sbcs(rd, storefnc)    load_inv_c_flag(a2) generate_sbb(a1, a0); update_sub_flags(); storefnc(a1, rd);
+#define arm_data_proc_sbcs(rd, storefnc)    generate_function_call(sh4_sbc_flags); generate_mov(a1, rv); storefnc(a1, rd);
 #define arm_data_proc_rsc(rd, storefnc)     load_inv_c_flag(a2) generate_sbb(a0, a1); storefnc(a0, rd);
-#define arm_data_proc_rscs(rd, storefnc)    load_inv_c_flag(a2) generate_sbb(a0, a1); update_sub_flags(); storefnc(a0, rd);
+#define arm_data_proc_rscs(rd, storefnc)    generate_function_call(sh4_rsc_flags); generate_mov(a0, rv); storefnc(a0, rd);
 
 #define arm_data_proc_test_tst()   generate_and(a0, a1); update_logical_flags()
 #define arm_data_proc_test_teq()   generate_xor(a0, a1); update_logical_flags()
@@ -1331,7 +1373,11 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define execute_store_spsr()                                                  \
   generate_load_reg(a2, CPU_MODE);                                            \
   generate_and_imm(a2, 0xF);                                                  \
-  generate_load_spsr(a1, a2);                                                 \
+  generate_store_reg(a0, REG_SAVE);  /* save new value across func call */    \
+  generate_store_reg(a2, REG_SAVE2); /* save mode index across func call */   \
+  generate_load_spsr(a1, a2);        /* a1 = old SPSR (clobbers a0, a2) */   \
+  generate_load_reg(a0, REG_SAVE);   /* restore new value */                  \
+  generate_load_reg(a2, REG_SAVE2);  /* restore mode index */                 \
   generate_and_imm(a0,  spsr_masks[psr_pfield]);                              \
   generate_and_imm(a1, ~spsr_masks[psr_pfield]);                              \
   generate_or(a0, a1);                                                        \
@@ -1450,8 +1496,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define arm_block_memory_adjust_pc_store()
 #define arm_block_memory_adjust_pc_load()                                     \
   if(reg_list & 0x8000) {                                                     \
-    generate_mov(a0, rv); /* rv→a0: rv has loaded PC, a0 is what branch uses */\
-    generate_indirect_branch_arm();                                           \
+    generate_exit_block();                                                    \
   }
 
 #define arm_block_memory_offset_down_a()                                      \
