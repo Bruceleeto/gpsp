@@ -18,6 +18,17 @@ void sh4_indirect_branch_dual(u32 address);
 u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
 extern void lookup_pc(void); /* in sh4_stub.S — block dispatch entry */
 
+/* JIT calls read/write_memory directly — no wrappers needed */
+#define execute_load_u8   read_memory8
+#define execute_load_u16  read_memory16
+#define execute_load_u32  read_memory32
+#define execute_load_s8   read_memory8s
+#define execute_load_s16  read_memory16s
+#define execute_store_u8  write_memory8
+#define execute_store_u16 write_memory16
+#define execute_store_u32 write_memory32
+#define execute_store_aligned_u32 write_memory32
+
 /* Debug/validation - define SH4_DYNAREC_DEBUG before including to enable */
 #include "sh4_debug.h"
 
