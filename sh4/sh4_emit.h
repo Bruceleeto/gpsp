@@ -16,6 +16,7 @@ void sh4_indirect_branch_arm(u32 address);
 void sh4_indirect_branch_thumb(u32 address);
 void sh4_indirect_branch_dual(u32 address);
 u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
+extern void lookup_pc(void); /* in sh4_stub.S — block dispatch entry */
 
 /* Debug/validation - define SH4_DYNAREC_DEBUG before including to enable */
 #include "sh4_debug.h"
@@ -474,19 +475,15 @@ static u32 function_cc sh4_rsc_flags(u32 op2, u32 rn) {
 
 /* ---- Function calls ---- */
 /* Save PR (clobbered by jsr), call func, restore PR.
- * Also save/restore r8 (reg_base) and r9 (reg_cycles) since C functions
- * might clobber them despite ABI saying they're callee-saved.
+ * r8 (reg_base) and r9 (reg_cycles) are callee-saved per SH4 ABI,
+ * so C functions will preserve them — no need to save/restore.
  * Args are already in r4-r6 (a0-a2), return in r0. */
 #define generate_function_call(func)                                          \
   do {                                                                        \
     sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 (push PR) */          \
-    sh4_emit16(0x2F86);              /* mov.l r8, @-r15 (push r8) */          \
-    sh4_emit16(0x2F96);              /* mov.l r9, @-r15 (push r9) */          \
     generate_load_imm(0, (u32)(func));                                        \
     sh4_emit16(0x400B | (0 << 8));  /* jsr @r0 */                             \
     sh4_emit16(0x0009);              /* nop (delay slot) */                    \
-    sh4_emit16(0x69F6);              /* mov.l @r15+, r9 (pop r9) */           \
-    sh4_emit16(0x68F6);              /* mov.l @r15+, r8 (pop r8) */           \
     sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr (pop PR) */           \
   } while(0)
 
@@ -572,29 +569,30 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
     *(u16*)_bf = (*(u16*)_bf & 0xFF00) | (_d & 0xFF);                         \
   } while(0)
 
-#define generate_branch_patch_unconditional(dest, target)
+/* Patchable direct jump: initially jumps to lookup_pc (fallback),
+ * but can be patched to jump directly to a translated block.
+ * wb is set to the .long address for patching.
+ * Must handle alignment: mov.l @(d,PC) EA = (PC+4)&~3 + d*4 */
+#define generate_branch_filler(wb)                                            \
+  do {                                                                        \
+    u8 *_mov_addr = translation_ptr;                                          \
+    sh4_emit16(0);                   /* placeholder: mov.l @(d,PC), r0 */    \
+    sh4_emit16(0x402B | (0 << 8));   /* jmp @r0 */                           \
+    sh4_emit16(0x0009);              /* nop (delay slot) */                   \
+    if ((uintptr_t)translation_ptr & 2)                                       \
+      sh4_emit16(0x0009);           /* pad to 4-byte align if needed */      \
+    (wb) = translation_ptr;                                                   \
+    *(u32*)translation_ptr = (u32)lookup_pc;  /* default: lookup_pc */        \
+    translation_ptr += 4;                                                     \
+    *(u16*)_mov_addr = 0xD000 | (0 << 8) |                                   \
+      (u32)(((wb) - (u8*)(((uintptr_t)_mov_addr + 4) & ~(uintptr_t)3)) >> 2); \
+  } while(0)
+
+#define generate_branch_patch_unconditional(dest, target)                     \
+  *(u32*)(dest) = (u32)(target)
 
 /* ---- Branches ---- */
-/* Branch with cycle update: subtract cycles, store PC, check if r9<0,
- * if so call sh4_update_gba (which handles frame timing), then exit.
- *
- * Layout:
- *   generate_cycle_update()    ; sub cycles from r9
- *   store target PC to REG_PC
- *   cmp/pz r9                  ; T = (r9 >= 0)
- *   bt skip                    ; skip update_gba call if cycles remain
- *   load r0 = target PC        ; r0 = PC for sh4_update_gba
- *   sts.l pr, @-r15            ; save PR
- *   load r1 = &sh4_update_gba
- *   jsr @r1                    ; call sh4_update_gba
- *   nop                        ; delay slot
- *   lds.l @r15+, pr            ; restore PR
- * skip:
- *   rts                        ; return to lookup_pc
- *   nop
- */
 #define generate_branch_cycle_update(wb, pc_val)                              \
-  (wb) = translation_ptr;                                                     \
   generate_cycle_update();                                                    \
   generate_store_reg_i32(pc_val, REG_PC);                                     \
   sh4_emit16(0x4011 | (reg_cycles << 8)); /* cmp/pz r9 */                    \
@@ -611,13 +609,12 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
     *(u16*)_bt_patch = 0x8900 |                                               \
       (((translation_ptr - _bt_patch - 4) / 2) & 0xFF);                      \
   } while(0);                                                                 \
-  generate_exit_block()
+  generate_branch_filler(wb)
 
 /* Branch without cycle update (conditional branches) */
 #define generate_branch_no_cycle_update(wb, pc_val)                           \
-  (wb) = translation_ptr;                                                     \
   generate_store_reg_i32(pc_val, REG_PC);                                     \
-  generate_exit_block()
+  generate_branch_filler(wb)
 
 /* Indirect branches: target PC already in a0 (r4) */
 #define generate_indirect_branch_cycle_update(type)                           \

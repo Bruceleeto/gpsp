@@ -3190,10 +3190,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
-  /* SH4: generate_branch_patch_unconditional is a no-op (can't easily do
-   * relative branches with SH4's limited displacement), so skip the cascade.
-   * External exits resolve lazily at runtime via lookup_pc. */
-#ifndef SH4_ARCH
   for(i = 0; i < external_block_exit_position; i++)
   {
     branch_target = external_block_exits[i].branch_target;
@@ -3206,7 +3202,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
-#endif
   return true;
 }
 
@@ -3359,7 +3354,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
-#ifndef SH4_ARCH
   for(i = 0; i < external_block_exit_position; i++)
   {
     branch_target = external_block_exits[i].branch_target;
@@ -3372,7 +3366,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
-#endif
   return true;
 }
 

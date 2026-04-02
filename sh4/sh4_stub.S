@@ -76,7 +76,7 @@ defsymbl(execute_arm_translate_internal)
     bra     lookup_pc
     nop
 
-lookup_pc:
+defsymbl(lookup_pc)
     mov.l   @(REG_PC, r8), r4     /* r4 = PC */
     /* Check CPSR thumb bit to decide ARM vs Thumb lookup */
     mov     #REG_CPSR, r0
