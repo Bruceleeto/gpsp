@@ -1824,27 +1824,32 @@ static void function_cc sh4_hle_div_arm(void)
 #define thumb_lsl_imm_op()                                                    \
   if (imm) { generate_shift_carry_call(a0, imm, sh4_lsl_carry); }             \
   else { generate_or(a0, a0); }                                               \
+  sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_lsr_imm_op()                                                    \
   if (imm) { generate_shift_carry_call(a0, imm, sh4_lsr_carry); }             \
   else { generate_shift_right(a0, 31); generate_update_flag(nz, REG_C_FLAG); generate_xor(a0, a0); } \
+  sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_asr_imm_op()                                                    \
   if (imm) { generate_shift_carry_call(a0, imm, sh4_asr_carry); }             \
   else { generate_shift_right_arithmetic(a0, 31); generate_update_flag(s, REG_C_FLAG); } \
+  sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_ror_imm_op()                                                    \
   if (imm) { generate_shift_carry_call(a0, imm, sh4_ror_carry); }             \
   else { generate_rrx_flags(a0); }                                            \
+  sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_shift_operation_imm(op_type)   thumb_##op_type##_imm_op()
 #define thumb_shift_operation_reg(op_type)                                    \
   generate_##op_type##_flags_reg(a0);                                         \
   generate_or(a0, a0);                                                        \
+  sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_shift(decode_type, op_type, value_type)                         \
