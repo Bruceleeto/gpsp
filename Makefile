@@ -1,8 +1,8 @@
 # gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= LINUX
+PLATFORM ?= DC
 
-HAVE_DYNAREC ?= 0
+HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
 SH4_DEBUG ?= 0
 
@@ -33,8 +33,9 @@ else
       MMAP_JIT_CACHE = 1
    endif
 
-   CFLAGS  += -m32 $(SDL_CFLAGS)
-   LDFLAGS += -m32
+   ARCH_FLAGS := -m32
+   CFLAGS  += $(ARCH_FLAGS) $(SDL_CFLAGS)
+   LDFLAGS += $(ARCH_FLAGS)
 endif
 
 INCFLAGS := -I$(CORE_DIR)
@@ -99,8 +100,8 @@ OBJECTS := $(patsubst %.c,$(BUILDDIR)/%.o,$(SOURCES_C)) \
            $(patsubst %.S,$(BUILDDIR)/%.o,$(SOURCES_ASM)) \
            $(patsubst %.cc,$(BUILDDIR)/%.o,$(SOURCES_CC))
 
-CFLAGS   += $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
-CXXFLAGS  = $(CFLAGS) -fno-rtti -fno-exceptions -std=c++11
+CFLAGS   += -std=gnu2x $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
+CXXFLAGS  = -std=gnu++2b -fno-rtti -fno-exceptions $(ARCH_FLAGS) $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
 
 .PHONY: all clean
 
