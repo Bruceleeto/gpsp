@@ -1412,7 +1412,8 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   cycle_count++;                                                              \
   generate_load_reg_pc(a1, rd, 12);                                           \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type)
+  generate_function_call(execute_store_##mem_type);                           \
+  generate_store_alert_check()
 
 #define no_op
 
@@ -1499,7 +1500,8 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   generate_load_reg_pc(a1, i, 12);                                            \
   arm_block_memory_writeback_post_store(wb_type);                             \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_u32)
+  generate_function_call(execute_store_u32);                                  \
+  generate_store_alert_check()
 
 #define arm_block_memory_adjust_pc_store()
 #define arm_block_memory_adjust_pc_load()                                     \
@@ -1572,7 +1574,9 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   generate_load_reg(a0, rn);                                                  \
   generate_load_reg(a1, rm);                                                  \
   generate_store_reg(a2, rd);                                                 \
+  generate_store_reg_i32(pc + 4, REG_PC);                                     \
   generate_function_call(execute_store_##type);                               \
+  generate_store_alert_check();                                               \
 }
 
 /* Collapse separate flag slots back into CPSR (same as interpreter's
@@ -1594,6 +1598,45 @@ void function_cc sh4_extract_flags(void)
   reg[REG_C_FLAG] = (reg[REG_CPSR] >> 29) & 1;
   reg[REG_V_FLAG] = (reg[REG_CPSR] >> 28) & 1;
 }
+
+/* ---- Store alert handler ---- */
+/* Called when a memory store returns a non-zero cpu_alert_type.
+ * Handles SMC (cache flush), IRQ (raise interrupts), and HALT
+ * (runs update_gba loop until CPU wakes, then lets lookup_pc
+ * dispatch to the IRQ handler). */
+static void function_cc sh4_store_alert(u32 alert)
+{
+  sh4_collapse_flags();
+  if (alert & CPU_ALERT_SMC)
+    flush_translation_cache_ram();
+  if (alert & CPU_ALERT_IRQ)
+    check_and_raise_interrupts();
+  if (alert & CPU_ALERT_HALT) {
+    /* Spin in update_gba until CPU wakes (IRQ fires).
+     * This matches x86's cpu_sleep_loop behavior. */
+    while (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
+      u32 ret = update_gba(0);
+      if (ret & 0x80000000)
+        break;  /* frame complete */
+    }
+    /* After waking, lookup_pc will dispatch to the new PC
+     * (IRQ vector or wherever check_and_raise_interrupts set it). */
+  }
+}
+
+/* After a store function call, check r0 (return value).
+ * If non-zero, call sh4_store_alert and exit the block. */
+#define generate_store_alert_check()                                          \
+  do {                                                                        \
+    sh4_emit16(0x2008 | (0 << 8) | (0 << 4)); /* tst r0, r0 */             \
+    sh4_emit16(0x8900); /* bt skip (no alert, T=1 means r0==0) */           \
+    u8 *_alert_patch = translation_ptr - 2;                                  \
+    generate_mov(a0, rv); /* a0 = alert type for sh4_store_alert */          \
+    generate_function_call(sh4_store_alert);                                  \
+    generate_exit_block(); /* rts -> lookup_pc -> dispatch to new PC */      \
+    *(u16*)_alert_patch = 0x8900 |                                           \
+      (((translation_ptr - _alert_patch - 4) / 2) & 0xFF);                  \
+  } while(0)
 
 /* ---- SWI and execute helpers ---- */
 static void function_cc execute_swi(u32 pc)
@@ -1882,7 +1925,8 @@ static void function_cc sh4_hle_div_arm(void)
   cycle_count++;                                                              \
   generate_load_reg(a1, reg_rd);                                              \
   generate_store_reg_i32(pc + 2, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type)
+  generate_function_call(execute_store_##mem_type);                           \
+  generate_store_alert_check()
 
 #define thumb_access_memory_generate_address_pc_relative(off, _rb, _ro)       \
   generate_load_pc(a0, (off))
@@ -1962,7 +2006,8 @@ static void function_cc sh4_hle_div_arm(void)
 #define thumb_block_memory_final_store()                                      \
   generate_load_reg(a1, i);                                                   \
   generate_store_reg_i32(pc + 2, REG_PC);                                     \
-  generate_function_call(execute_store_u32)
+  generate_function_call(execute_store_u32);                                  \
+  generate_store_alert_check()
 
 #define thumb_block_memory_final_no(access_type)                              \
   thumb_block_memory_final_##access_type()
