@@ -141,8 +141,10 @@ cpu_sleep_loop:
     /* Check if frame complete (bit 31) */
     cmp/pz  r0
     bf      return_to_main
-    /* Update cycles */
-    mov     r0, r9
+    /* Update cycles — mask off status bits (changed_pc, frame_complete) */
+    mov.w   csl_mask, r1
+    and     r0, r1
+    mov     r1, r9
     /* Check CPU_HALT_STATE */
     mov     #CPU_HALT_STATE, r0
     mov.l   @(r0, r8), r2
@@ -151,6 +153,9 @@ cpu_sleep_loop:
     bra     lookup_pc
     nop
 
+    .align 1
+csl_mask:
+    .word   0x7FFF
     .align 2
 update_gba_addr:
     .long   _update_gba
@@ -265,6 +270,62 @@ blk_dual_addr:
     .long   _block_lookup_address_dual
 ind_lookup_pc_lit:
     .long   lookup_pc
+
+/* ---- Write epilogue ---- */
+/* Called from JIT cold path when a store returns non-zero cpu_alert_type.
+ * r4 (a0) = alert type, r8 = reg_base, r9 = reg_cycles.
+ * Handles SMC/IRQ/HALT in assembly so we have access to r9.
+ * For HALT, falls into cpu_sleep_loop which passes r9 to update_gba. */
+defsymbl(write_epilogue)
+    sts.l   pr, @-r15              /* save PR for jsr calls */
+    mov     r4, r10                /* save alert in callee-saved r10 */
+
+    /* Collapse flags before calling C */
+    mov.l   we_collapse_addr, r0
+    jsr     @r0
+    nop
+
+    /* Check SMC */
+    mov     #CPU_ALERT_SMC, r0
+    tst     r0, r10
+    bt      .we_no_smc
+    mov.l   we_flush_addr, r0
+    jsr     @r0
+    nop
+.we_no_smc:
+
+    /* Check IRQ */
+    mov     #CPU_ALERT_IRQ, r0
+    tst     r0, r10
+    bt      .we_no_irq
+    mov.l   we_raise_addr, r0
+    jsr     @r0
+    nop
+.we_no_irq:
+
+    /* Check HALT */
+    mov     #CPU_ALERT_HALT, r0
+    tst     r0, r10
+    bt      .we_no_halt
+
+    /* HALT: pop saved PR, enter cpu_sleep_loop (uses r9 correctly) */
+    lds.l   @r15+, pr
+    bra     cpu_sleep_loop
+    nop
+
+.we_no_halt:
+    /* Non-HALT: pop saved PR, re-dispatch */
+    lds.l   @r15+, pr
+    bra     lookup_pc
+    nop
+
+    .align 2
+we_collapse_addr:
+    .long   _sh4_collapse_flags
+we_flush_addr:
+    .long   _flush_translation_cache_ram
+we_raise_addr:
+    .long   _check_and_raise_interrupts
 
 /* ---- BSS: Global state ---- */
 .bss

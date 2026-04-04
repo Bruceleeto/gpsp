@@ -17,6 +17,7 @@ void sh4_indirect_branch_thumb(u32 address);
 void sh4_indirect_branch_dual(u32 address);
 u32 function_cc sh4_execute_store_cpsr(u32 new_cpsr, u32 user_mask, u32 priv_mask);
 extern void lookup_pc(void); /* in sh4_stub.S — block dispatch entry */
+extern void write_epilogue(void); /* in sh4_stub.S — store alert handler */
 
 /* JIT calls read/write_memory directly — no wrappers needed */
 #define execute_load_u8   read_memory8
@@ -1599,41 +1600,18 @@ void function_cc sh4_extract_flags(void)
   reg[REG_V_FLAG] = (reg[REG_CPSR] >> 28) & 1;
 }
 
-/* ---- Store alert handler ---- */
-/* Called when a memory store returns a non-zero cpu_alert_type.
- * Handles SMC (cache flush), IRQ (raise interrupts), and HALT
- * (runs update_gba loop until CPU wakes, then lets lookup_pc
- * dispatch to the IRQ handler). */
-static void function_cc sh4_store_alert(u32 alert)
-{
-  sh4_collapse_flags();
-  if (alert & CPU_ALERT_SMC)
-    flush_translation_cache_ram();
-  if (alert & CPU_ALERT_IRQ)
-    check_and_raise_interrupts();
-  if (alert & CPU_ALERT_HALT) {
-    /* Spin in update_gba until CPU wakes (IRQ fires).
-     * This matches x86's cpu_sleep_loop behavior. */
-    while (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
-      u32 ret = update_gba(0);
-      if (ret & 0x80000000)
-        break;  /* frame complete */
-    }
-    /* After waking, lookup_pc will dispatch to the new PC
-     * (IRQ vector or wherever check_and_raise_interrupts set it). */
-  }
-}
-
 /* After a store function call, check r0 (return value).
- * If non-zero, call sh4_store_alert and exit the block. */
+ * If non-zero, jump to write_epilogue in sh4_stub.S which handles
+ * SMC/IRQ/HALT in assembly with access to r9 (reg_cycles). */
 #define generate_store_alert_check()                                          \
   do {                                                                        \
     sh4_emit16(0x2008 | (0 << 8) | (0 << 4)); /* tst r0, r0 */             \
     sh4_emit16(0x8900); /* bt skip (no alert, T=1 means r0==0) */           \
     u8 *_alert_patch = translation_ptr - 2;                                  \
-    generate_mov(a0, rv); /* a0 = alert type for sh4_store_alert */          \
-    generate_function_call(sh4_store_alert);                                  \
-    generate_exit_block(); /* rts -> lookup_pc -> dispatch to new PC */      \
+    generate_mov(a0, rv); /* a0 = alert type for write_epilogue */           \
+    generate_load_imm(0, (u32)write_epilogue);                               \
+    sh4_emit16(0x402B | (0 << 8)); /* jmp @r0 */                            \
+    sh4_emit16(0x0009); /* nop (delay slot) */                               \
     *(u16*)_alert_patch = 0x8900 |                                           \
       (((translation_ptr - _alert_patch - 4) / 2) & 0xFF);                  \
   } while(0)
