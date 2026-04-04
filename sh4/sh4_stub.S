@@ -60,6 +60,7 @@ defsymbl(execute_arm_translate_internal)
 
     mov     r4, r9          /* reg_cycles = cycles */
     mov     r5, r8          /* reg_base = regptr */
+    mov.l   ftable_addr, r10 /* reg_ftable = function pointer table */
 
     /* Extract flags from CPSR into separate flag slots */
     mov.l   extract_flags_addr, r0
@@ -112,6 +113,8 @@ lookup_arm:
     .align 2
 extract_flags_addr:
     .long   _sh4_extract_flags
+ftable_addr:
+    .long   _sh4_ftable
 lookup_arm_addr:
     .long   _block_lookup_address_arm
 lookup_pc_lit:
@@ -278,7 +281,7 @@ ind_lookup_pc_lit:
  * For HALT, falls into cpu_sleep_loop which passes r9 to update_gba. */
 defsymbl(write_epilogue)
     sts.l   pr, @-r15              /* save PR for jsr calls */
-    mov     r4, r10                /* save alert in callee-saved r10 */
+    mov     r4, r11                /* save alert in callee-saved r11 (r10=ftable) */
 
     /* Collapse flags before calling C */
     mov.l   we_collapse_addr, r0
@@ -287,7 +290,7 @@ defsymbl(write_epilogue)
 
     /* Check SMC */
     mov     #CPU_ALERT_SMC, r0
-    tst     r0, r10
+    tst     r0, r11
     bt      .we_no_smc
     mov.l   we_flush_addr, r0
     jsr     @r0
@@ -296,7 +299,7 @@ defsymbl(write_epilogue)
 
     /* Check IRQ */
     mov     #CPU_ALERT_IRQ, r0
-    tst     r0, r10
+    tst     r0, r11
     bt      .we_no_irq
     mov.l   we_raise_addr, r0
     jsr     @r0
@@ -305,7 +308,7 @@ defsymbl(write_epilogue)
 
     /* Check HALT */
     mov     #CPU_ALERT_HALT, r0
-    tst     r0, r10
+    tst     r0, r11
     bt      .we_no_halt
 
     /* HALT: pop saved PR, enter cpu_sleep_loop (uses r9 correctly) */

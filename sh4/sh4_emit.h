@@ -41,6 +41,7 @@ extern void write_epilogue(void); /* in sh4_stub.S — store alert handler */
 /* ---- Register mapping ---- */
 #define reg_base    8    /* r8: callee-saved, pointer to reg[] */
 #define reg_cycles  9    /* r9: callee-saved, cycle counter */
+#define reg_ftable  10   /* r10: callee-saved, pointer to sh4_ftable[] */
 #define reg_a0      4    /* r4: first C arg */
 #define reg_a1      5    /* r5: second C arg */
 #define reg_a2      6    /* r6: third C arg */
@@ -485,6 +486,35 @@ static u32 function_cc sh4_rsc_flags(u32 op2, u32 rn) {
 #define generate_multiply_s64_add(a, b, c) sh4_emit16(0x0009)
 #define generate_multiply_u64_add(a, b, c) sh4_emit16(0x0009)
 
+/* ---- Function pointer table ---- */
+/* r10 points to this table at runtime. JIT loads function addresses via
+ * mov.l @(slot, r10), r0 — 2 bytes instead of 14-byte inline constant.
+ * Saves ~12 bytes per function call. */
+#define FTAB_READ_MEM8     0
+#define FTAB_READ_MEM16    1
+#define FTAB_READ_MEM32    2
+#define FTAB_READ_MEM8S    3
+#define FTAB_READ_MEM16S   4
+#define FTAB_WRITE_MEM8    5
+#define FTAB_WRITE_MEM16   6
+#define FTAB_WRITE_MEM32   7
+#define FTAB_COLLAPSE       8
+#define FTAB_LSL_CARRY      9
+#define FTAB_LSR_CARRY     10
+#define FTAB_ASR_CARRY     11
+#define FTAB_ROR_CARRY     12
+
+/* Token-paste mapping: execute_load_u32 → FTAB_READ_MEM32, etc. */
+#define ftab_execute_load_u8          FTAB_READ_MEM8
+#define ftab_execute_load_u16         FTAB_READ_MEM16
+#define ftab_execute_load_u32         FTAB_READ_MEM32
+#define ftab_execute_load_s8          FTAB_READ_MEM8S
+#define ftab_execute_load_s16         FTAB_READ_MEM16S
+#define ftab_execute_store_u8         FTAB_WRITE_MEM8
+#define ftab_execute_store_u16        FTAB_WRITE_MEM16
+#define ftab_execute_store_u32        FTAB_WRITE_MEM32
+#define ftab_execute_store_aligned_u32 FTAB_WRITE_MEM32
+
 /* ---- Function calls ---- */
 /* Save PR (clobbered by jsr), call func, restore PR.
  * r8 (reg_base) and r9 (reg_cycles) are callee-saved per SH4 ABI,
@@ -498,6 +528,21 @@ static u32 function_cc sh4_rsc_flags(u32 op2, u32 rn) {
     sh4_emit16(0x0009);              /* nop (delay slot) */                    \
     sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr (pop PR) */           \
   } while(0)
+
+/* Fast function call via table: 10 bytes instead of 22.
+ * mov.l @(slot, r10), r0 loads the address in 2 bytes. */
+#define generate_function_call_ftab(slot)                                     \
+  do {                                                                        \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 (push PR) */          \
+    sh4_emit16(0x5000 | (0 << 8) | (reg_ftable << 4) | (slot));             \
+    sh4_emit16(0x400B | (0 << 8));  /* jsr @r0 */                             \
+    sh4_emit16(0x0009);              /* nop (delay slot) */                    \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr (pop PR) */           \
+  } while(0)
+
+/* Memory function call via table — uses token-paste for execute_load_u32 etc. */
+#define generate_memory_call(mem_func)                                        \
+  generate_function_call_ftab(ftab_##mem_func)
 
 /* ---- Exit block ---- */
 #define generate_exit_block()                                                 \
@@ -988,35 +1033,64 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
     generate_rrx(ireg);                                                       \
   }
 
+/* Inline LSL #N with carry (N=1-31). SHLL captures MSB→T as carry.
+ * Shift left by (N-1) via SHLD, then SHLL does the last bit + carry. */
 #define generate_shift_imm_lsl_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_lsl_carry);                    \
+    if (shift > 1) {                                                          \
+      sh4_emit16(0xE000 | (0 << 8) | ((shift - 1) & 0xFF));                 \
+      sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4));                        \
+    }                                                                         \
+    sh4_emit16(0x4000 | ((ireg) << 8)); /* shll: <<1, MSB→T */              \
+    sh4_emit16(0x0029 | (0 << 8));      /* movt r0 = carry */               \
+    generate_store_reg(0, REG_C_FLAG);                                        \
   }
 
+/* Inline LSR #N with carry (N=1-31). SHLR captures LSB→T as carry.
+ * Shift right by (N-1) via SHLD, then SHLR does the last bit + carry. */
 #define generate_shift_imm_lsr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_lsr_carry);                    \
+    if (shift > 1) {                                                          \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(shift-1)) & 0xFF));      \
+      sh4_emit16(0x400D | ((ireg) << 8) | (0 << 4));                        \
+    }                                                                         \
+    sh4_emit16(0x4001 | ((ireg) << 8)); /* shlr: >>1, LSB→T */              \
+    sh4_emit16(0x0029 | (0 << 8));      /* movt r0 = carry */               \
+    generate_store_reg(0, REG_C_FLAG);                                        \
   } else {                                                                    \
+    /* LSR #0 encodes LSR #32: carry = MSB, result = 0 */                    \
     generate_shift_right(ireg, 31);                                           \
     generate_store_reg(ireg, REG_C_FLAG);                                     \
     generate_load_imm(ireg, 0);                                               \
   }
 
+/* Inline ASR #N with carry (N=1-31). SHAR captures LSB→T, sign-extends.
+ * Arithmetic right by (N-1) via SHAD, then SHAR does last bit + carry. */
 #define generate_shift_imm_asr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_asr_carry);                    \
+    if (shift > 1) {                                                          \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(shift-1)) & 0xFF));      \
+      sh4_emit16(0x400C | ((ireg) << 8) | (0 << 4));                        \
+    }                                                                         \
+    sh4_emit16(0x4021 | ((ireg) << 8)); /* shar: >>1 arith, LSB→T */        \
+    sh4_emit16(0x0029 | (0 << 8));      /* movt r0 = carry */               \
+    generate_store_reg(0, REG_C_FLAG);                                        \
   } else {                                                                    \
+    /* ASR #0 encodes ASR #32: carry = MSB, result = sign-fill */            \
     generate_shift_right_arithmetic(ireg, 31);                                \
     generate_update_flag(nz, REG_C_FLAG);                                     \
   }
 
+/* ROR: keep C helper (two shifts + OR is complex inline). Use ftab. */
 #define generate_shift_imm_ror_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_ror_carry);                    \
+    generate_load_imm(a1, shift);                                             \
+    generate_function_call_ftab(FTAB_ROR_CARRY);                              \
+    if ((ireg) != rv) generate_mov(ireg, rv);                                 \
   } else {                                                                    \
     generate_rrx_flags(ireg);                                                 \
   }
@@ -1032,25 +1106,25 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 /* Register shift with flags: a1 already has shift amount from
  * generate_shift_reg. Call C helper for correct carry. */
 #define generate_lsl_flags_reg(ireg)                                          \
-  generate_function_call(sh4_lsl_carry);                                      \
+  generate_function_call_ftab(FTAB_LSL_CARRY);                                      \
   if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_lsr_flags_reg(ireg)                                          \
-  generate_function_call(sh4_lsr_carry);                                      \
+  generate_function_call_ftab(FTAB_LSR_CARRY);                                      \
   if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_asr_flags_reg(ireg)                                          \
-  generate_function_call(sh4_asr_carry);                                      \
+  generate_function_call_ftab(FTAB_ASR_CARRY);                                      \
   if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
 
 #define generate_ror_flags_reg(ireg)                                          \
-  generate_function_call(sh4_ror_carry);                                      \
+  generate_function_call_ftab(FTAB_ROR_CARRY);                                      \
   if ((ireg) != rv) generate_mov(ireg, rv);                                   \
   generate_or(ireg, ireg);                                                    \
   update_logical_flags()
@@ -1107,7 +1181,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 
 /* ---- Flag collapse: pack N,Z,C,V back into CPSR bits 31-28 ---- */
 #define collapse_flags(a, b)                                                  \
-  generate_function_call(sh4_collapse_flags)
+  generate_function_call_ftab(FTAB_COLLAPSE)
 
 /* ---- Flag update macros ---- */
 /* generate_update_flag dispatches on type: z, s, c, nc, o, nz
@@ -1406,14 +1480,14 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define arm_access_memory_load(mem_type)                                       \
   cycle_count += 2;                                                           \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_##mem_type);                            \
+  generate_memory_call(execute_load_##mem_type);                            \
   generate_store_reg_pc_no_flags(rv, rd)
 
 #define arm_access_memory_store(mem_type)                                      \
   cycle_count++;                                                              \
   generate_load_reg_pc(a1, rd, 12);                                           \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type);                           \
+  generate_memory_call(execute_store_##mem_type);                           \
   generate_store_alert_check()
 
 #define no_op
@@ -1489,19 +1563,19 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 
 #define arm_block_memory_load()                                               \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_u32);                                   \
+  generate_memory_call(execute_load_u32);                                   \
   generate_store_reg(rv, i)
 
 #define arm_block_memory_store()                                              \
   generate_load_reg_pc(a1, i, 8);                                             \
-  generate_function_call(execute_store_aligned_u32)
+  generate_memory_call(execute_store_aligned_u32)
 
 #define arm_block_memory_final_load(wb_type)   arm_block_memory_load()
 #define arm_block_memory_final_store(wb_type)                                 \
   generate_load_reg_pc(a1, i, 12);                                            \
   arm_block_memory_writeback_post_store(wb_type);                             \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_u32);                                  \
+  generate_memory_call(execute_store_u32);                                  \
   generate_store_alert_check()
 
 #define arm_block_memory_adjust_pc_store()
@@ -1570,13 +1644,13 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   cycle_count += 3;                                                           \
   generate_load_reg(a0, rn);                                                  \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_##type);                                \
+  generate_memory_call(execute_load_##type);                                \
   generate_mov(a2, rv);                                                       \
   generate_load_reg(a0, rn);                                                  \
   generate_load_reg(a1, rm);                                                  \
   generate_store_reg(a2, rd);                                                 \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_##type);                               \
+  generate_memory_call(execute_store_##type);                               \
   generate_store_alert_check();                                               \
 }
 
@@ -1599,6 +1673,24 @@ void function_cc sh4_extract_flags(void)
   reg[REG_C_FLAG] = (reg[REG_CPSR] >> 29) & 1;
   reg[REG_V_FLAG] = (reg[REG_CPSR] >> 28) & 1;
 }
+
+/* Function pointer table — r10 points here at runtime.
+ * Slot order must match FTAB_* defines above. */
+u32 sh4_ftable[] __attribute__((aligned(4))) = {
+  (u32)read_memory8,        /* 0: FTAB_READ_MEM8 */
+  (u32)read_memory16,       /* 1: FTAB_READ_MEM16 */
+  (u32)read_memory32,       /* 2: FTAB_READ_MEM32 */
+  (u32)read_memory8s,       /* 3: FTAB_READ_MEM8S */
+  (u32)read_memory16s,      /* 4: FTAB_READ_MEM16S */
+  (u32)write_memory8,       /* 5: FTAB_WRITE_MEM8 */
+  (u32)write_memory16,      /* 6: FTAB_WRITE_MEM16 */
+  (u32)write_memory32,      /* 7: FTAB_WRITE_MEM32 */
+  (u32)sh4_collapse_flags,  /* 8: FTAB_COLLAPSE */
+  (u32)sh4_lsl_carry,       /* 9: FTAB_LSL_CARRY */
+  (u32)sh4_lsr_carry,       /* 10: FTAB_LSR_CARRY */
+  (u32)sh4_asr_carry,       /* 11: FTAB_ASR_CARRY */
+  (u32)sh4_ror_carry,       /* 12: FTAB_ROR_CARRY */
+};
 
 /* After a store function call, check r0 (return value).
  * If non-zero, jump to write_epilogue in sh4_stub.S which handles
@@ -1849,28 +1941,52 @@ static void function_cc sh4_hle_div_arm(void)
   generate_store_reg(a0, REG_SP);                                             \
 }
 
-/* Thumb shifts */
+/* Thumb shifts — inline carry extraction using SHLL/SHLR/SHAR + T bit */
 #define thumb_lsl_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsl_carry); }             \
-  else { generate_or(a0, a0); }                                               \
+  if (imm) {                                                                  \
+    if (imm > 1) {                                                            \
+      sh4_emit16(0xE000 | (0 << 8) | ((imm - 1) & 0xFF));                   \
+      sh4_emit16(0x400D | (a0 << 8) | (0 << 4));                            \
+    }                                                                         \
+    sh4_emit16(0x4000 | (a0 << 8)); /* shll: <<1, MSB→T */                  \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = carry */                   \
+    generate_store_reg(0, REG_C_FLAG);                                        \
+  } else { generate_or(a0, a0); }                                            \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_lsr_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsr_carry); }             \
-  else { generate_shift_right(a0, 31); generate_update_flag(nz, REG_C_FLAG); generate_xor(a0, a0); } \
+  if (imm) {                                                                  \
+    if (imm > 1) {                                                            \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(imm-1)) & 0xFF));        \
+      sh4_emit16(0x400D | (a0 << 8) | (0 << 4));                            \
+    }                                                                         \
+    sh4_emit16(0x4001 | (a0 << 8)); /* shlr: >>1, LSB→T */                  \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = carry */                   \
+    generate_store_reg(0, REG_C_FLAG);                                        \
+  } else { generate_shift_right(a0, 31); generate_update_flag(nz, REG_C_FLAG); generate_xor(a0, a0); } \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_asr_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_asr_carry); }             \
-  else { generate_shift_right_arithmetic(a0, 31); generate_update_flag(s, REG_C_FLAG); } \
+  if (imm) {                                                                  \
+    if (imm > 1) {                                                            \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(-(s32)(imm-1)) & 0xFF));        \
+      sh4_emit16(0x400C | (a0 << 8) | (0 << 4));                            \
+    }                                                                         \
+    sh4_emit16(0x4021 | (a0 << 8)); /* shar: >>1 arith, LSB→T */            \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = carry */                   \
+    generate_store_reg(0, REG_C_FLAG);                                        \
+  } else { generate_shift_right_arithmetic(a0, 31); generate_update_flag(s, REG_C_FLAG); } \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_ror_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_ror_carry); }             \
-  else { generate_rrx_flags(a0); }                                            \
+  if (imm) {                                                                  \
+    generate_load_imm(a1, imm);                                               \
+    generate_function_call_ftab(FTAB_ROR_CARRY);                              \
+    generate_mov(a0, rv);                                                     \
+  } else { generate_rrx_flags(a0); }                                         \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
@@ -1896,14 +2012,14 @@ static void function_cc sh4_hle_div_arm(void)
 #define thumb_access_memory_load(mem_type, reg_rd)                            \
   cycle_count += 2;                                                           \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_##mem_type);                            \
+  generate_memory_call(execute_load_##mem_type);                            \
   generate_store_reg(rv, reg_rd)
 
 #define thumb_access_memory_store(mem_type, reg_rd)                           \
   cycle_count++;                                                              \
   generate_load_reg(a1, reg_rd);                                              \
   generate_store_reg_i32(pc + 2, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type);                           \
+  generate_memory_call(execute_store_##mem_type);                           \
   generate_store_alert_check()
 
 #define thumb_access_memory_generate_address_pc_relative(off, _rb, _ro)       \
@@ -1961,7 +2077,7 @@ static void function_cc sh4_hle_div_arm(void)
   generate_load_reg(a0, REG_SAVE3);                                           \
   generate_add_imm(a0, (bit_count[reg_list] * 4));                            \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_u32);                                   \
+  generate_memory_call(execute_load_u32);                                   \
   generate_store_reg(rv, REG_PC);                                             \
   generate_indirect_branch_exit_with_cycle()
 
@@ -1969,22 +2085,22 @@ static void function_cc sh4_hle_div_arm(void)
   generate_load_reg(a0, REG_SAVE3);                                           \
   generate_add_imm(a0, (bit_count[reg_list] * 4));                            \
   generate_load_reg(a1, REG_LR);                                              \
-  generate_function_call(execute_store_aligned_u32)
+  generate_memory_call(execute_store_aligned_u32)
 
 #define thumb_block_memory_load()                                             \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_u32);                                   \
+  generate_memory_call(execute_load_u32);                                   \
   generate_store_reg(rv, i)
 
 #define thumb_block_memory_store()                                            \
   generate_load_reg(a1, i);                                                   \
-  generate_function_call(execute_store_aligned_u32)
+  generate_memory_call(execute_store_aligned_u32)
 
 #define thumb_block_memory_final_load()    thumb_block_memory_load()
 #define thumb_block_memory_final_store()                                      \
   generate_load_reg(a1, i);                                                   \
   generate_store_reg_i32(pc + 2, REG_PC);                                     \
-  generate_function_call(execute_store_u32);                                  \
+  generate_memory_call(execute_store_u32);                                  \
   generate_store_alert_check()
 
 #define thumb_block_memory_final_no(access_type)                              \
