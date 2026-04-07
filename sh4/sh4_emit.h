@@ -504,8 +504,19 @@ static u32 function_cc sh4_rsc_flags(u32 op2, u32 rn) {
   sh4_emit16(0x000b); /* rts */                                               \
   sh4_emit16(0x0009)  /* nop (delay slot) */
 
-/* ---- Flags (stubs - T-bit based, Phase 3) ---- */
-#define generate_update_flag(type, flag)  sh4_emit16(0x0009)
+/* ---- Flag update dispatch ---- */
+/* generate_update_flag dispatches on type: z, s, c, nc, o, nz
+ * Must be defined before any call site (shift_imm_asr_flags uses nz). */
+#define generate_update_flag(type, flag)  generate_update_flag_##type(flag)
+
+/* nz flag: non-zero test (result != 0). Needed early for shift carry. */
+#define generate_update_flag_nz(flag)                                         \
+  do {                                                                        \
+    sh4_emit16(0x2008 | (sh4_res_reg << 8) | (sh4_res_reg << 4));            \
+    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = (result==0) */              \
+    sh4_emit16(0xCA00 | 1);         /* xor #1 → r0 = (result!=0) */         \
+    generate_store_reg(0, flag);                                              \
+  } while(0)
 
 /* SPSR load/store via C helpers (indexed by CPU mode) */
 static u32 function_cc sh4_load_spsr(u32 mode_idx) {
@@ -1109,12 +1120,10 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define collapse_flags(a, b)                                                  \
   generate_function_call(sh4_collapse_flags)
 
-/* ---- Flag update macros ---- */
-/* generate_update_flag dispatches on type: z, s, c, nc, o, nz
- * Result register is tracked in sh4_res_reg (set by arithmetic macros).
- * Second operand register tracked in sh4_src_reg (for carry computation). */
-
-#define generate_update_flag(type, flag)  generate_update_flag_##type(flag)
+/* ---- Flag update macros (continued) ---- */
+/* generate_update_flag already defined above (before shift macros).
+ * Result register tracked in sh4_res_reg (set by arithmetic macros).
+ * Second operand tracked in sh4_src_reg (for carry computation). */
 
 /* Z flag: T = (result == 0), store T */
 #define generate_update_flag_z(flag)                                          \
@@ -1174,14 +1183,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
     generate_store_reg(0, flag);                                              \
   } while(0)
 
-/* nz flag: non-zero test (used for shift carry) */
-#define generate_update_flag_nz(flag)                                         \
-  do {                                                                        \
-    sh4_emit16(0x2008 | (sh4_res_reg << 8) | (sh4_res_reg << 4));            \
-    sh4_emit16(0x0029 | (0 << 8));  /* movt r0 = (result==0) */              \
-    sh4_emit16(0xCA00 | 1);         /* xor #1 → r0 = (result!=0) */         \
-    generate_store_reg(0, flag);                                              \
-  } while(0)
+/* nz flag: defined earlier (before shift macros) */
 
 #define update_logical_flags()                                                \
   if (check_generate_z_flag) { generate_update_flag(z, REG_Z_FLAG); }         \
