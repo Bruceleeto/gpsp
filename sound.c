@@ -35,6 +35,9 @@ static fixed16_16 gbc_sound_tick_step;
 
 void sound_timer_queue32(u32 channel, u32 value)
 {
+#ifdef DC_NO_AV
+  (void)channel; (void)value;
+#else
   direct_sound_struct *ds = &direct_sound_channel[channel];
 
   ds->fifo[ds->fifo_top++] = value & 0xFF;
@@ -48,11 +51,16 @@ void sound_timer_queue32(u32 channel, u32 value)
 
   ds->fifo[ds->fifo_top++] = (value >> 24);
   ds->fifo_top &= 31;
+#endif
 }
 
 
 unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
 {
+#ifdef DC_NO_AV
+  (void)frequency_step; (void)channel;
+  return 0;
+#else
   int ret = 0;
   u32 sample_status = DIRECT_SOUND_INACTIVE;
   direct_sound_struct *ds = &direct_sound_channel[channel];
@@ -144,6 +152,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
       gba_dma_transfer(2, &ret);
   }
   return ret;
+#endif /* !DC_NO_AV */
 }
 
 void sound_reset_fifo(u32 channel)
@@ -398,6 +407,10 @@ u32 gbc_sound_master_volume;
 
 void render_gbc_sound()
 {
+#ifdef DC_NO_AV
+  gbc_sound_last_cpu_ticks = cpu_ticks;
+  return;
+#else
   u32 i, i2;
   gbc_sound_struct *gs = gbc_sound_channel;
   fixed16_16 sample_index, frequency_step;
@@ -501,6 +514,7 @@ void render_gbc_sound()
   gbc_sound_last_cpu_ticks = cpu_ticks;
   gbc_sound_buffer_index =
    (gbc_sound_buffer_index + (buffer_ticks * 2)) & BUFFER_SIZE_MASK;
+#endif /* !DC_NO_AV */
 }
 
 // Special thanks to blarrg for the LSFR frequency used in Meridian, as posted
@@ -797,6 +811,10 @@ unsigned sound_write_savestate(u8 *dst)
 
 u32 sound_read_samples(s16 *out, u32 frames)
 {
+#ifdef DC_NO_AV
+   (void)out; (void)frames;
+   return 0;
+#else
    u32 i;
    u32 samples_to_read   = frames << 1;
    /* Get total number of samples in the buffer */
@@ -830,4 +848,5 @@ u32 sound_read_samples(s16 *out, u32 frames)
 
    /* Function returns number of frames read */
    return (samples_to_read >> 1);
+#endif /* !DC_NO_AV */
 }

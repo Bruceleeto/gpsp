@@ -1,10 +1,11 @@
 # gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= DC
+PLATFORM ?= LINUX
 
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
 SH4_DEBUG ?= 0
+DC_NO_AV ?= 0
 
 TARGET   := gpsp
 BUILDDIR := obj
@@ -82,6 +83,9 @@ ifeq ($(OVERCLOCK_60FPS), 1)
 endif
 ifeq ($(SH4_DEBUG), 1)
    DEFINES += -DSH4_DYNAREC_DEBUG -DSH4_DYNAREC_HEXDUMP
+endif
+ifeq ($(DC_NO_AV), 1)
+   DEFINES += -DDC_NO_AV
 endif
 
 ifeq ($(CPU_ARCH), x86_32)

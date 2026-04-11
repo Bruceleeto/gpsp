@@ -2300,6 +2300,9 @@ static const u8 active_layers[] = {
 
 void update_scanline(void)
 {
+#ifdef DC_NO_AV
+  return;
+#else
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
   u32 vcount = read_ioreg(REG_VCOUNT);
@@ -2350,6 +2353,7 @@ void update_scanline(void)
       affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD);
     }
   }
+#endif /* !DC_NO_AV */
 }
 
 

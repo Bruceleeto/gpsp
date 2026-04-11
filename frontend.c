@@ -64,17 +64,20 @@ static int running = 1;
 /* Dreamcast: PVR + Maple                                                    */
 /* ========================================================================= */
 
+#ifndef DC_NO_AV
 #define PVR_TEX_W 256
 #define PVR_TEX_H 256
 
 static pvr_ptr_t pvr_txr;
 static void *pvr_txr_sq;
+#endif /* !DC_NO_AV */
 static u32 dc_key_state = 0;
 
 static frameskip_type current_frameskip_type = no_frameskip;
 static u32 frameskip_value = 1;
 static u32 frameskip_counter = 0;
 
+#ifndef DC_NO_AV
 /* ---- DC audio via snd_stream ---- */
 #include <dc/sound/sound.h>
 #include <dc/sound/stream.h>
@@ -98,6 +101,7 @@ static void *dc_snd_callback(snd_stream_hnd_t hnd, int bytes_req, int *bytes_rec
    *bytes_recv = frames * 4;
    return dc_snd_buf;
 }
+#endif /* !DC_NO_AV */
 
 static int16_t dc_input_state_cb(unsigned port, unsigned device,
                                   unsigned index, unsigned id)
@@ -142,6 +146,7 @@ static void dc_poll_input(void)
    if (state->rtrig > 16)                dc_key_state |= BUTTON_R;
 }
 
+#ifndef DC_NO_AV
 /* Pre-computed PVR header — built once at init, reused every frame */
 static pvr_poly_hdr_t dc_poly_hdr;
 static float dc_u_max, dc_v_max;
@@ -195,6 +200,7 @@ static void dc_submit_frame(void)
    pvr_list_finish();
    pvr_scene_finish();  /* Non-blocking — PVR renders while we emulate next frame */
 }
+#endif /* !DC_NO_AV */
 
 /* ========================================================================= */
 #else
@@ -328,6 +334,7 @@ int main(int argc, char *argv[])
    const char *bios_path = (argc > 2) ? argv[2] : NULL;
 
 #ifdef DREAMCAST
+#ifndef DC_NO_AV
    pvr_init_defaults();
    pvr_txr = pvr_mem_malloc(PVR_TEX_W * PVR_TEX_H * sizeof(u16));
    pvr_txr_sq = (void *)(((uintptr_t)pvr_txr & 0xFFFFFF) | PVR_TA_TEX_MEM);
@@ -336,6 +343,7 @@ int main(int argc, char *argv[])
    /* ---- DC audio ---- */
    snd_stream_init();
    dc_snd_hnd = snd_stream_alloc(dc_snd_callback, SND_STREAM_BUFFER_MAX);
+#endif /* !DC_NO_AV */
 #else
    /* ---- SDL init ---- */
    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
@@ -443,8 +451,10 @@ int main(int argc, char *argv[])
    reset_gba();
 
 #ifdef DREAMCAST
+#ifndef DC_NO_AV
    if (dc_snd_hnd != SND_STREAM_INVALID)
       snd_stream_start(dc_snd_hnd, GBA_SOUND_FREQUENCY, 1);
+#endif
 #else
    /* Start audio playback */
    SDL_PauseAudio(0);
@@ -475,11 +485,13 @@ int main(int argc, char *argv[])
             execute_arm(execute_cycles);
          }
 
+#ifndef DC_NO_AV
          if (!skip_next_frame)
             dc_submit_frame();
 
          if (dc_snd_hnd != SND_STREAM_INVALID)
             snd_stream_poll(dc_snd_hnd);
+#endif
 
          virtual_ticks += frame_ms;
          u32 now = (u32)timer_ms_gettime64();
@@ -522,6 +534,7 @@ int main(int argc, char *argv[])
             virtual_ticks = now;
       }
 
+#ifndef DC_NO_AV
       if (pvr_txr)
          pvr_mem_free(pvr_txr);
       if (dc_snd_hnd != SND_STREAM_INVALID)
@@ -531,6 +544,7 @@ int main(int argc, char *argv[])
       }
       snd_stream_shutdown();
       pvr_shutdown();
+#endif
    }
 #else
    Uint32 frame_ms   = (Uint32)(1000.0f / GBA_FPS);
