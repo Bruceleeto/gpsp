@@ -1405,10 +1405,98 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 }
 
 /* ---- Memory access ---- */
+
+/* Inline read fast path: emit memory_map_read[] table lookup directly into
+ * the generated code.  Covers EWRAM, IWRAM, ROM with zero function-call
+ * overhead.  Falls back to C for IO/palette/VRAM/OAM (NULL map entry).
+ *
+ * a0 (r4) = address on entry (set by caller).  Result in r0.
+ * Clobbers r0, r1, r2 only.  r4 (address) and r5 (pc) preserved.
+ *
+ * align_mask: 0 = byte, 1 = halfword, 3 = word (0 skips check)
+ * load_op:    mov.{b,w,l} @(r0,r1),r0 opcode
+ * ext_op:     extu.{b,w} r0,r0 opcode (0 = none for 32-bit)
+ * cfunc:      C fallback
+ */
+/* Inline read fast path via memory_map_read[].  Region guard filters out
+ * BIOS(00, 16KB) and IO(04, 1KB) whose arrays are smaller than the 32KB
+ * page mask.  Palette/OAM are NULL in the table so the NULL check handles
+ * them.  VRAM(06) has entries but minor mirror inaccuracy is acceptable. */
+#define generate_inline_mem_read(align_mask, load_op, ext_op, cfunc)          \
+  do {                                                                        \
+    u8 *_af = NULL, *_rf = NULL, *_io = NULL;                                 \
+    /* r0 = address */                                                        \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    if (align_mask) {                                                         \
+      sh4_emit16(0xC800 | (align_mask)); /* tst #mask, r0 */                 \
+      _af = translation_ptr;                                                  \
+      sh4_emit16(0x8B00); /* bf -> slow (misaligned) */                      \
+    }                                                                         \
+    /* Region guard: only BIOS(00) and IO(04) are dangerous (small arrays   \
+     * mapped to 32KB pages). Everything else is safe or NULL-caught. */     \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 -> region byte */            \
+    sh4_emit16(0xE000 | (2 << 8) | 2); /* mov #2, r2 */                     \
+    sh4_emit16(0x3002 | (0 << 8) | (2 << 4)); /* cmp/hs r2, r0 (>=2?) */   \
+    _rf = translation_ptr;                                                    \
+    sh4_emit16(0x8B00); /* bf -> slow (region 0x00-0x01) */                  \
+    sh4_emit16(0x8800 | 0x04); /* cmp/eq #4, r0 (IO?) */                    \
+    _io = translation_ptr;                                                    \
+    sh4_emit16(0x8900); /* bt -> slow (IO regs) */                           \
+    /* page lookup: reload address from a0 */                                 \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */        \
+    sh4_emit16(0xE000 | (1 << 8) | ((-15) & 0xFF)); /* mov #-15, r1 */      \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0 */             \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 */                           \
+    generate_load_imm(1, (u32)memory_map_read);                               \
+    sh4_emit16(0x000E | (1 << 8) | (1 << 4)); /* mov.l @(r0,r1), r1 */      \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1, r1 */              \
+    u8 *_nf = translation_ptr;                                                \
+    sh4_emit16(0x8900); /* bt -> slow (NULL map) */                          \
+    /* fast: map[address & 0x7FFF] */                                         \
+    sh4_emit16(0xE0FF); /* mov #-1, r0 -> 0xFFFFFFFF */                      \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 -> 0x0000FFFF */            \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   -> 0x00007FFF */            \
+    sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
+    sh4_emit16(load_op);                                                      \
+    if (ext_op) sh4_emit16(ext_op);                                           \
+    u8 *_db = translation_ptr;                                                \
+    sh4_emit16(0xA000); /* bra -> done (placeholder) */                      \
+    sh4_emit16(0x0009); /* nop */                                             \
+    /* -- slow path -- */                                                     \
+    u8 *_sp = translation_ptr;                                                \
+    if (_af) *(u16*)_af = 0x8B00 | (((_sp - _af - 4) / 2) & 0xFF);         \
+    if (_rf) *(u16*)_rf = 0x8B00 | (((_sp - _rf - 4) / 2) & 0xFF);         \
+    if (_io) *(u16*)_io = 0x8900 | (((_sp - _io - 4) / 2) & 0xFF);         \
+    *(u16*)_nf = 0x8900 | (((_sp - _nf - 4) / 2) & 0xFF);                   \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(0, (u32)(cfunc));                                       \
+    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 */                             \
+    sh4_emit16(0x0009); /* nop */                                             \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
+    /* -- patch bra -> done -- */                                             \
+    *(u16*)_db = 0xA000 | (((translation_ptr - _db - 4) / 2) & 0xFFF);      \
+  } while(0)
+
+/* Byte-safe inline read: uses only mov.b to avoid SH4 alignment faults.
+ * memory_map_read page pointers may not be halfword/word aligned. */
+#define generate_inline_load_u8()                                             \
+  generate_inline_mem_read(0, 0x001C, 0x600C, read_memory8)
+
+#define generate_inline_load_u16()                                            \
+  generate_inline_mem_read(1, 0x001D, 0x600D, read_memory16)
+#define generate_inline_load_u32()                                            \
+  generate_inline_mem_read(3, 0x001E, 0, read_memory32)
+/* signed: uncommon, keep as C call */
+#define generate_inline_load_s8()                                             \
+  generate_function_call(execute_load_s8)
+#define generate_inline_load_s16()                                            \
+  generate_function_call(execute_load_s16)
+
 #define arm_access_memory_load(mem_type)                                       \
   cycle_count += 2;                                                           \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_##mem_type);                            \
+  generate_inline_load_##mem_type();                                          \
   generate_store_reg_pc_no_flags(rv, rd)
 
 #define arm_access_memory_store(mem_type)                                      \
@@ -1898,7 +1986,7 @@ static void function_cc sh4_hle_div_arm(void)
 #define thumb_access_memory_load(mem_type, reg_rd)                            \
   cycle_count += 2;                                                           \
   generate_load_pc(a1, pc);                                                   \
-  generate_function_call(execute_load_##mem_type);                            \
+  generate_inline_load_##mem_type();                                          \
   generate_store_reg(rv, reg_rd)
 
 #define thumb_access_memory_store(mem_type, reg_rd)                           \

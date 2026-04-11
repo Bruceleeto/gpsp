@@ -1,6 +1,6 @@
 # gpSP standalone build
 # PLATFORM: LINUX (default) or DC
-PLATFORM ?= LINUX
+PLATFORM ?= DC
 
 HAVE_DYNAREC ?= 1
 OVERCLOCK_60FPS ?= 0
@@ -18,7 +18,8 @@ ifeq ($(PLATFORM),DC)
    CXX      := kos-cc
    TARGET   := gpsp.elf
    CPU_ARCH := sh4
-   CFLAGS   += -O3 -flto  -fno-pic -fno-omit-frame-pointer -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
+   OPTIMIZE  = -O3 -flto -fno-pic -fno-omit-frame-pointer
+   CFLAGS   += -DDREAMCAST -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4
    LDFLAGS  :=
    LIBS     := -lm
 else
@@ -104,8 +105,9 @@ OBJECTS := $(patsubst %.c,$(BUILDDIR)/%.o,$(SOURCES_C)) \
            $(patsubst %.S,$(BUILDDIR)/%.o,$(SOURCES_ASM)) \
            $(patsubst %.cc,$(BUILDDIR)/%.o,$(SOURCES_CC))
 
-CFLAGS   += -std=gnu2x $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
-CXXFLAGS  = -std=gnu++2b -fno-rtti -fno-exceptions $(ARCH_FLAGS) $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
+COMMON_FLAGS = $(DEFINES) $(OPTIMIZE) $(INCFLAGS)
+CFLAGS   += -std=gnu2x $(COMMON_FLAGS)
+CXXFLAGS  = -std=gnu++2b -fno-rtti -fno-exceptions $(ARCH_FLAGS) $(COMMON_FLAGS)
 
 .PHONY: all clean
 
