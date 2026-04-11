@@ -1499,11 +1499,77 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   generate_inline_load_##mem_type();                                          \
   generate_store_reg_pc_no_flags(rv, rd)
 
+/* Inline write fast path.  Same memory_map_read[] lookup as reads — the
+ * page pointers for EWRAM, IWRAM, VRAM point to the same backing buffers.
+ * VRAM mirroring is handled by the page table entries (page 3 → vram base).
+ * Palette(05)/OAM(07) are NULL → caught by NULL check → fall to C.
+ *
+ * Extra guard vs reads: ROM writes (0x08+) have save/GPIO side effects.
+ * Guard: region < 2 → slow, region == 4 → slow, region >= 8 → slow. */
+#define generate_inline_mem_write(store_op, cfunc)                            \
+  do {                                                                        \
+    u8 *_rf = NULL, *_io = NULL, *_rom = NULL;                                \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 -> region */                 \
+    sh4_emit16(0xE000 | (2 << 8) | 2); /* mov #2, r2 */                     \
+    sh4_emit16(0x3002 | (0 << 8) | (2 << 4)); /* cmp/hs r2, r0 (>=2?) */   \
+    _rf = translation_ptr;                                                    \
+    sh4_emit16(0x8B00); /* bf -> slow (region 0x00-0x01) */                  \
+    sh4_emit16(0x8800 | 0x04); /* cmp/eq #4, r0 (IO?) */                    \
+    _io = translation_ptr;                                                    \
+    sh4_emit16(0x8900); /* bt -> slow */                                     \
+    sh4_emit16(0xE000 | (2 << 8) | 8); /* mov #8, r2 */                     \
+    sh4_emit16(0x3002 | (0 << 8) | (2 << 4)); /* cmp/hs r2, r0 (>=8?) */   \
+    _rom = translation_ptr;                                                   \
+    sh4_emit16(0x8900); /* bt -> slow (ROM writes) */                        \
+    /* page lookup */                                                         \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */        \
+    sh4_emit16(0xE000 | (1 << 8) | ((-15) & 0xFF)); /* mov #-15, r1 */      \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0 */             \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 */                           \
+    generate_load_imm(1, (u32)memory_map_read);                               \
+    sh4_emit16(0x000E | (1 << 8) | (1 << 4)); /* mov.l @(r0,r1), r1 */      \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1, r1 */              \
+    u8 *_nf = translation_ptr;                                                \
+    sh4_emit16(0x8900); /* bt -> slow (NULL = palette/OAM) */               \
+    /* store: map[address & 0x7FFF] = value */                                \
+    sh4_emit16(0xE0FF); /* mov #-1, r0 */                                    \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 -> 0xFFFF */                \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   -> 0x7FFF */                \
+    sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
+    sh4_emit16(store_op); /* mov.x a1, @(r0, r1) */                          \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    u8 *_db = translation_ptr;                                                \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                             \
+    /* -- slow path -- */                                                     \
+    u8 *_sp = translation_ptr;                                                \
+    *(u16*)_rf = 0x8B00 | (((_sp - _rf - 4) / 2) & 0xFF);                   \
+    *(u16*)_io = 0x8900 | (((_sp - _io - 4) / 2) & 0xFF);                   \
+    *(u16*)_rom = 0x8900 | (((_sp - _rom - 4) / 2) & 0xFF);                 \
+    *(u16*)_nf = 0x8900 | (((_sp - _nf - 4) / 2) & 0xFF);                   \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(0, (u32)(cfunc));                                       \
+    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 */                             \
+    sh4_emit16(0x0009); /* nop */                                             \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
+    *(u16*)_db = 0xA000 | (((translation_ptr - _db - 4) / 2) & 0xFFF);      \
+  } while(0)
+
+/* store opcodes: mov.b r5,@(r0,r1)=0x0154  mov.w=0x0155  mov.l=0x0156 */
+#define generate_inline_store_u8()                                            \
+  generate_inline_mem_write(0x0154, write_memory8)
+#define generate_inline_store_u16()                                           \
+  generate_inline_mem_write(0x0155, write_memory16)
+#define generate_inline_store_u32()                                           \
+  generate_inline_mem_write(0x0156, write_memory32)
+
 #define arm_access_memory_store(mem_type)                                      \
   cycle_count++;                                                              \
   generate_load_reg_pc(a1, rd, 12);                                           \
   generate_store_reg_i32(pc + 4, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type);                           \
+  generate_inline_store_##mem_type();                                         \
   generate_store_alert_check()
 
 #define no_op
@@ -1993,7 +2059,7 @@ static void function_cc sh4_hle_div_arm(void)
   cycle_count++;                                                              \
   generate_load_reg(a1, reg_rd);                                              \
   generate_store_reg_i32(pc + 2, REG_PC);                                     \
-  generate_function_call(execute_store_##mem_type);                           \
+  generate_inline_store_##mem_type();                                         \
   generate_store_alert_check()
 
 #define thumb_access_memory_generate_address_pc_relative(off, _rb, _ro)       \
