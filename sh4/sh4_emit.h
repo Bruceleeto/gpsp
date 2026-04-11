@@ -370,7 +370,79 @@ extern void write_epilogue(void); /* in sh4_stub.S — store alert handler */
 #define generate_rcr1(ireg)                                                   \
   sh4_emit16(0x4025 | ((ireg) << 8))
 
-/* ---- Safe C shift+carry helpers ---- */
+/* ---- Inline shift+carry for immediate amounts ---- */
+/* Replaces C function calls for the common case (known shift amount).
+ * Extracts carry bit inline using SH4 instructions.
+ * ireg = value register (a0), shift = amount (compile-time constant).
+ * After: ireg = shifted result, reg[REG_C_FLAG] = carry (0 or 1). */
+
+/* LSL #N carry: bit (32-N) of original → C. Result = val << N. */
+#define generate_inline_lsl_carry(ireg, shift)                                \
+  do {                                                                        \
+    if ((shift) == 1) {                                                       \
+      sh4_emit16(0x4000 | ((ireg) << 8)); /* shll ireg: MSB→T */            \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 = carry */                  \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    } else {                                                                  \
+      generate_mov(2, ireg); /* r2 = original */                              \
+      generate_shift_left(ireg, shift); /* ireg <<= N */                     \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)((shift) - 32) & 0xFF));         \
+      sh4_emit16(0x400D | (2 << 8) | (0 << 4)); /* shld r0, r2: r2 >>= (32-N) */ \
+      sh4_emit16(0x4001 | (2 << 8)); /* shlr r2: T = bit 0 = carry */       \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                          \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    }                                                                         \
+  } while(0)
+
+/* LSR #N carry: bit (N-1) of original → C. Result = val >> N (logical). */
+#define generate_inline_lsr_carry(ireg, shift)                                \
+  do {                                                                        \
+    if ((shift) == 1) {                                                       \
+      sh4_emit16(0x4001 | ((ireg) << 8)); /* shlr ireg: LSB→T */            \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                          \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    } else {                                                                  \
+      generate_mov(2, ireg); /* r2 = original */                              \
+      generate_shift_right(ireg, shift); /* ireg >>= N */                    \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(1 - (s32)(shift)) & 0xFF));     \
+      sh4_emit16(0x400D | (2 << 8) | (0 << 4)); /* shld: r2 >>= (N-1) */   \
+      sh4_emit16(0x4001 | (2 << 8)); /* shlr r2: T = carry */               \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                          \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    }                                                                         \
+  } while(0)
+
+/* ASR #N carry: bit (N-1) of original → C. Result = (s32)val >> N. */
+#define generate_inline_asr_carry(ireg, shift)                                \
+  do {                                                                        \
+    if ((shift) == 1) {                                                       \
+      sh4_emit16(0x4021 | ((ireg) << 8)); /* shar ireg: LSB→T */            \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                          \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    } else {                                                                  \
+      generate_mov(2, ireg); /* r2 = original */                              \
+      generate_shift_right_arithmetic(ireg, shift);                          \
+      sh4_emit16(0xE000 | (0 << 8) | ((u32)(1 - (s32)(shift)) & 0xFF));     \
+      sh4_emit16(0x400D | (2 << 8) | (0 << 4)); /* shld: r2 >>= (N-1) */   \
+      sh4_emit16(0x4001 | (2 << 8)); /* shlr r2: T = carry */               \
+      sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                          \
+      generate_store_reg(0, REG_C_FLAG);                                      \
+    }                                                                         \
+  } while(0)
+
+/* ROR #N carry: bit (N-1) of original → C. */
+#define generate_inline_ror_carry(ireg, shift)                                \
+  do {                                                                        \
+    generate_mov(2, ireg); /* r2 = original */                                \
+    generate_rotate_right(ireg, shift);                                      \
+    sh4_emit16(0xE000 | (0 << 8) | ((u32)(1 - (s32)(shift)) & 0xFF));       \
+    sh4_emit16(0x400D | (2 << 8) | (0 << 4)); /* shld: r2 >>= (N-1) */     \
+    sh4_emit16(0x4001 | (2 << 8)); /* shlr r2: T = carry */                 \
+    sh4_emit16(0x0029 | (0 << 8)); /* movt r0 */                            \
+    generate_store_reg(0, REG_C_FLAG);                                        \
+  } while(0)
+
+/* ---- Safe C shift+carry helpers (kept for register-amount shifts) ---- */
 /* These compute the shift result AND the correct carry flag in one call,
  * bypassing the broken generate_update_flag(c) which uses stale regs. */
 static u32 function_cc sh4_lsl_carry(u32 val, u32 amount) {
@@ -1002,13 +1074,13 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define generate_shift_imm_lsl_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_lsl_carry);                    \
+    generate_inline_lsl_carry(ireg, shift);                                   \
   }
 
 #define generate_shift_imm_lsr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_lsr_carry);                    \
+    generate_inline_lsr_carry(ireg, shift);                                   \
   } else {                                                                    \
     generate_shift_right(ireg, 31);                                           \
     generate_store_reg(ireg, REG_C_FLAG);                                     \
@@ -1018,7 +1090,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define generate_shift_imm_asr_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_asr_carry);                    \
+    generate_inline_asr_carry(ireg, shift);                                   \
   } else {                                                                    \
     generate_shift_right_arithmetic(ireg, 31);                                \
     generate_update_flag(nz, REG_C_FLAG);                                     \
@@ -1027,7 +1099,7 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 #define generate_shift_imm_ror_flags(ireg)                                    \
   generate_load_reg_pc(ireg, rm, 8);                                          \
   if(shift != 0) {                                                            \
-    generate_shift_carry_call(ireg, shift, sh4_ror_carry);                    \
+    generate_inline_ror_carry(ireg, shift);                                   \
   } else {                                                                    \
     generate_rrx_flags(ireg);                                                 \
   }
@@ -2005,27 +2077,27 @@ static void function_cc sh4_hle_div_arm(void)
   generate_store_reg(a0, REG_SP);                                             \
 }
 
-/* Thumb shifts */
+/* Thumb shifts — use inline carry for immediate amounts */
 #define thumb_lsl_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsl_carry); }             \
+  if (imm) { generate_inline_lsl_carry(a0, imm); }                            \
   else { generate_or(a0, a0); }                                               \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_lsr_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_lsr_carry); }             \
+  if (imm) { generate_inline_lsr_carry(a0, imm); }                            \
   else { generate_shift_right(a0, 31); generate_update_flag(nz, REG_C_FLAG); generate_xor(a0, a0); } \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_asr_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_asr_carry); }             \
+  if (imm) { generate_inline_asr_carry(a0, imm); }                            \
   else { generate_shift_right_arithmetic(a0, 31); generate_update_flag(s, REG_C_FLAG); } \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
 
 #define thumb_ror_imm_op()                                                    \
-  if (imm) { generate_shift_carry_call(a0, imm, sh4_ror_carry); }             \
+  if (imm) { generate_inline_ror_carry(a0, imm); }                            \
   else { generate_rrx_flags(a0); }                                            \
   sh4_res_reg = a0;                                                           \
   update_logical_flags()
