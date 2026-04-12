@@ -1578,7 +1578,10 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
  *
  * Extra guard vs reads: ROM writes (0x08+) have save/GPIO side effects.
  * Guard: region < 2 → slow, region == 4 → slow, region >= 8 → slow. */
-#define generate_inline_mem_write(store_op, cfunc)                            \
+/* align_shift: 0 = no alignment needed (byte), 1 = halfword (clear bit 0),
+ * 2 = word (clear bits 0-1). Emits shlr/shll pair to mimic ARM7TDMI's
+ * quiet alignment of misaligned stores. */                                   \
+#define generate_inline_mem_write(align_shift, store_op, cfunc)               \
   do {                                                                        \
     u8 *_rf = NULL, *_io = NULL, *_rom = NULL;                                \
     sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
@@ -1610,6 +1613,13 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
     sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 -> 0xFFFF */                \
     sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   -> 0x7FFF */                \
     sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
+    if (align_shift == 1) {                                                   \
+      sh4_emit16(0x4001 | (0 << 8)); /* shlr r0  */                          \
+      sh4_emit16(0x4000 | (0 << 8)); /* shll r0  -> clear bit 0 */           \
+    } else if (align_shift == 2) {                                            \
+      sh4_emit16(0x4009 | (0 << 8)); /* shlr2 r0 */                          \
+      sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 -> clear bits 0-1 */        \
+    }                                                                         \
     sh4_emit16(store_op); /* mov.x a1, @(r0, r1) */                          \
     sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
     u8 *_db = translation_ptr;                                                \
@@ -1631,11 +1641,11 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
 
 /* store opcodes: mov.b r5,@(r0,r1)=0x0154  mov.w=0x0155  mov.l=0x0156 */
 #define generate_inline_store_u8()                                            \
-  generate_inline_mem_write(0x0154, write_memory8)
+  generate_inline_mem_write(0, 0x0154, write_memory8)
 #define generate_inline_store_u16()                                           \
-  generate_inline_mem_write(0x0155, write_memory16)
+  generate_inline_mem_write(1, 0x0155, write_memory16)
 #define generate_inline_store_u32()                                           \
-  generate_inline_mem_write(0x0156, write_memory32)
+  generate_inline_mem_write(2, 0x0156, write_memory32)
 
 #define arm_access_memory_store(mem_type)                                      \
   cycle_count++;                                                              \

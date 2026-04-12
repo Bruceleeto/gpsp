@@ -1536,12 +1536,14 @@ cpu_alert_type function_cc write_memory8(u32 address, u8 value)
 
 cpu_alert_type function_cc write_memory16(u32 address, u16 value)
 {
+  address &= ~1u;
   write_memory(16);
   return CPU_ALERT_NONE;
 }
 
 cpu_alert_type function_cc write_memory32(u32 address, u32 value)
 {
+  address &= ~3u;
   write_memory(32);
   return CPU_ALERT_NONE;
 }
