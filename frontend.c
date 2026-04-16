@@ -168,8 +168,7 @@ static void dc_submit_frame(void)
    sq_cpy(pvr_txr_sq, gba_screen_pixels,
           GBA_SCREEN_PITCH * GBA_SCREEN_HEIGHT * sizeof(u16));
 
-   /* Wait for PVR to finish previous frame, then submit new one */
-   pvr_wait_ready();
+
    pvr_scene_begin();
    pvr_list_begin(PVR_LIST_OP_POLY);
 

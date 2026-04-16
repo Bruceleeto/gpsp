@@ -362,6 +362,9 @@ defsymbl(reg_mode)
 defsymbl(memory_map_read)
     .space (8 * 1024 * 4)
 
+defsymbl(memory_map_write)
+    .space (8 * 1024 * 4)
+
 defsymbl(rom_translation_cache)
     .space ROM_TRANSLATION_CACHE_SIZE
 defsymbl(ram_translation_cache)

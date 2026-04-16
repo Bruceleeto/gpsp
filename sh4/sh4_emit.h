@@ -1571,81 +1571,250 @@ static void function_cc sh4_store_spsr(u32 value, u32 mode_idx) {
   generate_inline_load_##mem_type();                                          \
   generate_store_reg_pc_no_flags(rv, rd)
 
-/* Inline write fast path.  Same memory_map_read[] lookup as reads — the
- * page pointers for EWRAM, IWRAM, VRAM point to the same backing buffers.
- * VRAM mirroring is handled by the page table entries (page 3 → vram base).
- * Palette(05)/OAM(07) are NULL → caught by NULL check → fall to C.
+/* Inline write fast path via memory_map_write[].
+ * memory_map_write[] has non-NULL entries ONLY for EWRAM/IWRAM/VRAM —
+ * every region where a plain store is correct.  No region guards needed;
+ * a single NULL check is sufficient.
  *
- * Extra guard vs reads: ROM writes (0x08+) have save/GPIO side effects.
- * Guard: region < 2 → slow, region == 4 → slow, region >= 8 → slow. */
-/* align_shift: 0 = no alignment needed (byte), 1 = halfword (clear bit 0),
- * 2 = word (clear bits 0-1). Emits shlr/shll pair to mimic ARM7TDMI's
- * quiet alignment of misaligned stores. */                                   \
-#define generate_inline_mem_write(align_shift, store_op, cfunc)               \
+ * Slow path (NULL entry) dispatches per-type:
+ *   u8:  OAM → NOP (GBA ignores byte OAM writes), else → C.
+ *   u16: palette → inline store+convert, OAM → inline store+flag, else → C.
+ *   u32: OAM → inline store+flag, else → C.
+ *
+ * store opcodes: mov.b r5,@(r0,r1)=0x0154  mov.w=0x0155  mov.l=0x0156
+ * Alignment: shlr/shll pairs mimic ARM7TDMI quiet alignment of stores. */
+
+/* ---- u8 store ---- */
+#define generate_inline_store_u8()                                            \
   do {                                                                        \
-    u8 *_rf = NULL, *_io = NULL, *_rom = NULL;                                \
+    /* -- fast path: memory_map_write[] lookup -- */                          \
     sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
-    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
-    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 -> region */                 \
-    sh4_emit16(0xE000 | (2 << 8) | 2); /* mov #2, r2 */                     \
-    sh4_emit16(0x3002 | (0 << 8) | (2 << 4)); /* cmp/hs r2, r0 (>=2?) */   \
-    _rf = translation_ptr;                                                    \
-    sh4_emit16(0x8B00); /* bf -> slow (region 0x00-0x01) */                  \
-    sh4_emit16(0x8800 | 0x04); /* cmp/eq #4, r0 (IO?) */                    \
-    _io = translation_ptr;                                                    \
-    sh4_emit16(0x8900); /* bt -> slow */                                     \
-    sh4_emit16(0xE000 | (2 << 8) | 8); /* mov #8, r2 */                     \
-    sh4_emit16(0x3002 | (0 << 8) | (2 << 4)); /* cmp/hs r2, r0 (>=8?) */   \
-    _rom = translation_ptr;                                                   \
-    sh4_emit16(0x8900); /* bt -> slow (ROM writes) */                        \
-    /* page lookup */                                                         \
-    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */        \
     sh4_emit16(0xE000 | (1 << 8) | ((-15) & 0xFF)); /* mov #-15, r1 */      \
-    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0 */             \
-    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 */                           \
-    generate_load_imm(1, (u32)memory_map_read);                               \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: >>15 */       \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0: *4 */                       \
+    generate_load_imm(1, (u32)memory_map_write);                              \
     sh4_emit16(0x000E | (1 << 8) | (1 << 4)); /* mov.l @(r0,r1), r1 */      \
     sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1, r1 */              \
-    u8 *_nf = translation_ptr;                                                \
-    sh4_emit16(0x8900); /* bt -> slow (NULL = palette/OAM) */               \
-    /* store: map[address & 0x7FFF] = value */                                \
+    u8 *_w8_null = translation_ptr;                                           \
+    sh4_emit16(0x8900); /* bt -> slow */                                     \
+    /* non-NULL: byte store */                                                \
     sh4_emit16(0xE0FF); /* mov #-1, r0 */                                    \
-    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 -> 0xFFFF */                \
-    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   -> 0x7FFF */                \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 → 0xFFFF */                \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   → 0x7FFF */                \
     sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
-    if (align_shift == 1) {                                                   \
-      sh4_emit16(0x4001 | (0 << 8)); /* shlr r0  */                          \
-      sh4_emit16(0x4000 | (0 << 8)); /* shll r0  -> clear bit 0 */           \
-    } else if (align_shift == 2) {                                            \
-      sh4_emit16(0x4009 | (0 << 8)); /* shlr2 r0 */                          \
-      sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 -> clear bits 0-1 */        \
-    }                                                                         \
-    sh4_emit16(store_op); /* mov.x a1, @(r0, r1) */                          \
+    sh4_emit16(0x0154); /* mov.b r5, @(r0,r1) */                            \
     sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
-    u8 *_db = translation_ptr;                                                \
+    u8 *_w8_done = translation_ptr;                                           \
     sh4_emit16(0xA000); /* bra -> done */                                    \
     sh4_emit16(0x0009); /* nop */                                             \
     /* -- slow path -- */                                                     \
-    u8 *_sp = translation_ptr;                                                \
-    *(u16*)_rf = 0x8B00 | (((_sp - _rf - 4) / 2) & 0xFF);                   \
-    *(u16*)_io = 0x8900 | (((_sp - _io - 4) / 2) & 0xFF);                   \
-    *(u16*)_rom = 0x8900 | (((_sp - _rom - 4) / 2) & 0xFF);                 \
-    *(u16*)_nf = 0x8900 | (((_sp - _nf - 4) / 2) & 0xFF);                   \
+    *(u16*)_w8_null = 0x8900 |                                                \
+      (((translation_ptr - _w8_null - 4) / 2) & 0xFF);                      \
+    /* check OAM (region 7): NOP for u8 writes */                            \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 → region */                 \
+    sh4_emit16(0x8800 | 0x07); /* cmp/eq #7, r0 (OAM?) */                   \
+    u8 *_w8_oam = translation_ptr;                                            \
+    sh4_emit16(0x8900); /* bt -> oam_nop */                                  \
+    /* not OAM: C fallback */                                                 \
     sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
-    generate_load_imm(0, (u32)(cfunc));                                       \
+    generate_load_imm(0, (u32)write_memory8);                                 \
     sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 */                             \
-    sh4_emit16(0x0009); /* nop */                                             \
+    sh4_emit16(0x0009); /* nop */                                              \
     sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
-    *(u16*)_db = 0xA000 | (((translation_ptr - _db - 4) / 2) & 0xFFF);      \
+    u8 *_w8_c_done = translation_ptr;                                         \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                              \
+    /* oam_nop: return 0 */                                                   \
+    *(u16*)_w8_oam = 0x8900 |                                                 \
+      (((translation_ptr - _w8_oam - 4) / 2) & 0xFF);                       \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    /* fall through to done */                                                \
+    *(u16*)_w8_done = 0xA000 |                                                \
+      (((translation_ptr - _w8_done - 4) / 2) & 0xFFF);                     \
+    *(u16*)_w8_c_done = 0xA000 |                                              \
+      (((translation_ptr - _w8_c_done - 4) / 2) & 0xFFF);                   \
   } while(0)
 
-/* store opcodes: mov.b r5,@(r0,r1)=0x0154  mov.w=0x0155  mov.l=0x0156 */
-#define generate_inline_store_u8()                                            \
-  generate_inline_mem_write(0, 0x0154, write_memory8)
+/* ---- u16 store ---- */
 #define generate_inline_store_u16()                                           \
-  generate_inline_mem_write(1, 0x0155, write_memory16)
+  do {                                                                        \
+    /* -- fast path: memory_map_write[] lookup -- */                          \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0xE000 | (1 << 8) | ((-15) & 0xFF)); /* mov #-15, r1 */      \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: >>15 */       \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0: *4 */                       \
+    generate_load_imm(1, (u32)memory_map_write);                              \
+    sh4_emit16(0x000E | (1 << 8) | (1 << 4)); /* mov.l @(r0,r1), r1 */      \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1, r1 */              \
+    u8 *_w16_null = translation_ptr;                                          \
+    sh4_emit16(0x8900); /* bt -> slow */                                     \
+    /* non-NULL: halfword store with alignment */                             \
+    sh4_emit16(0xE0FF); /* mov #-1, r0 */                                    \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 → 0xFFFF */                \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   → 0x7FFF */                \
+    sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0: clear bit 0 */               \
+    sh4_emit16(0x4000 | (0 << 8)); /* shll r0 */                            \
+    sh4_emit16(0x0155); /* mov.w r5, @(r0,r1) */                            \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    u8 *_w16_done = translation_ptr;                                          \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                             \
+    /* -- slow path: region dispatch -- */                                    \
+    *(u16*)_w16_null = 0x8900 |                                               \
+      (((translation_ptr - _w16_null - 4) / 2) & 0xFF);                     \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 → region */                 \
+    sh4_emit16(0x8800 | 0x05); /* cmp/eq #5, r0 (palette?) */               \
+    u8 *_w16_pal = translation_ptr;                                           \
+    sh4_emit16(0x8900); /* bt -> palette_u16 */                              \
+    sh4_emit16(0x8800 | 0x07); /* cmp/eq #7, r0 (OAM?) */                   \
+    u8 *_w16_oam = translation_ptr;                                           \
+    sh4_emit16(0x8900); /* bt -> oam_u16 */                                  \
+    /* neither: C fallback */                                                 \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(0, (u32)write_memory16);                                \
+    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 */                             \
+    sh4_emit16(0x0009); /* nop */                                              \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
+    u8 *_w16_c_done = translation_ptr;                                        \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                              \
+    /* -- palette u16: store + convert + store -- */                          \
+    *(u16*)_w16_pal = 0x8900 |                                                \
+      (((translation_ptr - _w16_pal - 4) / 2) & 0xFF);                      \
+    /* offset = address & 0x3FE */                                            \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0xE000 | (2 << 8) | 4); /* mov #4, r2 */                     \
+    sh4_emit16(0x4018 | (2 << 8)); /* shll8 r2 → 0x400 */                  \
+    sh4_emit16(0x7000 | (2 << 8) | ((-2) & 0xFF)); /* add #-2, r2 → 0x3FE */ \
+    sh4_emit16(0x2009 | (0 << 8) | (2 << 4)); /* and r2, r0 → offset */    \
+    sh4_emit16(0x6003 | (3 << 8) | (0 << 4)); /* mov r0, r3 (save offset) */\
+    /* store raw value to palette_ram[offset] */                              \
+    generate_load_imm(1, (u32)palette_ram);                                   \
+    sh4_emit16(0x0155); /* mov.w r5, @(r0,r1) */                            \
+    /* convert: ((val & 0x1F) << 11) | ((val>>5 & 0x1F) << 6) |             \
+     *           ((val >> 10) & 0x1F)                                        \
+     * GBA BGR555 → RGB565(5-bit green) for DC framebuffer */               \
+    /* red = (value & 0x1F) << 11 */                                         \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a1 << 4)); /* mov a1, r0 */         \
+    sh4_emit16(0xC900 | 0x1F); /* and #0x1F, r0 */                          \
+    sh4_emit16(0xE000 | (1 << 8) | 11); /* mov #11, r1 */                   \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: <<11 */      \
+    sh4_emit16(0x6003 | (2 << 8) | (0 << 4)); /* mov r0, r2 (red) */       \
+    /* green = ((value >> 5) & 0x1F) << 6 */                                 \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a1 << 4)); /* mov a1, r0 */         \
+    sh4_emit16(0xE000 | (1 << 8) | ((-5) & 0xFF)); /* mov #-5, r1 */        \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: >>5 */       \
+    sh4_emit16(0xC900 | 0x1F); /* and #0x1F, r0 */                          \
+    sh4_emit16(0xE000 | (1 << 8) | 6); /* mov #6, r1 */                     \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: <<6 */       \
+    sh4_emit16(0x200B | (2 << 8) | (0 << 4)); /* or r0, r2 */              \
+    /* blue = (value >> 10) & 0x1F */                                        \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a1 << 4)); /* mov a1, r0 */         \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 */                           \
+    sh4_emit16(0x4009 | (0 << 8)); /* shlr2 r0: >>10 total */               \
+    sh4_emit16(0xC900 | 0x1F); /* and #0x1F, r0 */                          \
+    sh4_emit16(0x200B | (2 << 8) | (0 << 4)); /* or r0, r2 (converted) */   \
+    /* store converted to palette_ram_converted[offset] */                    \
+    sh4_emit16(0x6003 | (0 << 8) | (3 << 4)); /* mov r3, r0 (offset) */     \
+    generate_load_imm(1, (u32)palette_ram_converted);                         \
+    sh4_emit16(0x0125); /* mov.w r2, @(r0,r1) */                            \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    u8 *_w16_p_done = translation_ptr;                                        \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                              \
+    /* -- OAM u16: store + set flag -- */                                     \
+    *(u16*)_w16_oam = 0x8900 |                                                \
+      (((translation_ptr - _w16_oam - 4) / 2) & 0xFF);                      \
+    /* offset = address & 0x3FE */                                            \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0xE000 | (2 << 8) | 4); /* mov #4, r2 */                     \
+    sh4_emit16(0x4018 | (2 << 8)); /* shll8 r2 → 0x400 */                  \
+    sh4_emit16(0x7000 | (2 << 8) | ((-2) & 0xFF)); /* add #-2, r2 → 0x3FE */ \
+    sh4_emit16(0x2009 | (0 << 8) | (2 << 4)); /* and r2, r0 */             \
+    generate_load_imm(1, (u32)oam_ram);                                       \
+    sh4_emit16(0x0155); /* mov.w r5, @(r0,r1) */                            \
+    /* reg[OAM_UPDATED] = 1 */                                               \
+    sh4_emit16(0xE000 | (0 << 8) | 1); /* mov #1, r0 */                     \
+    generate_store_reg(0, OAM_UPDATED);                                       \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    /* fall through to done */                                                \
+    *(u16*)_w16_done = 0xA000 |                                               \
+      (((translation_ptr - _w16_done - 4) / 2) & 0xFFF);                    \
+    *(u16*)_w16_c_done = 0xA000 |                                             \
+      (((translation_ptr - _w16_c_done - 4) / 2) & 0xFFF);                  \
+    *(u16*)_w16_p_done = 0xA000 |                                             \
+      (((translation_ptr - _w16_p_done - 4) / 2) & 0xFFF);                  \
+  } while(0)
+
+/* ---- u32 store ---- */
 #define generate_inline_store_u32()                                           \
-  generate_inline_mem_write(2, 0x0156, write_memory32)
+  do {                                                                        \
+    /* -- fast path: memory_map_write[] lookup -- */                          \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0xE000 | (1 << 8) | ((-15) & 0xFF)); /* mov #-15, r1 */      \
+    sh4_emit16(0x400D | (0 << 8) | (1 << 4)); /* shld r1, r0: >>15 */       \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0: *4 */                       \
+    generate_load_imm(1, (u32)memory_map_write);                              \
+    sh4_emit16(0x000E | (1 << 8) | (1 << 4)); /* mov.l @(r0,r1), r1 */      \
+    sh4_emit16(0x2008 | (1 << 8) | (1 << 4)); /* tst r1, r1 */              \
+    u8 *_w32_null = translation_ptr;                                          \
+    sh4_emit16(0x8900); /* bt -> slow */                                     \
+    /* non-NULL: word store with alignment */                                 \
+    sh4_emit16(0xE0FF); /* mov #-1, r0 */                                    \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 → 0xFFFF */                \
+    sh4_emit16(0x4001 | (0 << 8)); /* shlr r0   → 0x7FFF */                \
+    sh4_emit16(0x2009 | (0 << 8) | (reg_a0 << 4)); /* and a0, r0 */         \
+    sh4_emit16(0x4009 | (0 << 8)); /* shlr2 r0: clear bits 0-1 */           \
+    sh4_emit16(0x4008 | (0 << 8)); /* shll2 r0 */                           \
+    sh4_emit16(0x0156); /* mov.l r5, @(r0,r1) */                            \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    u8 *_w32_done = translation_ptr;                                          \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                             \
+    /* -- slow path: region dispatch -- */                                    \
+    *(u16*)_w32_null = 0x8900 |                                               \
+      (((translation_ptr - _w32_null - 4) / 2) & 0xFF);                     \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0x4029 | (0 << 8)); /* shlr16 r0 */                           \
+    sh4_emit16(0x4019 | (0 << 8)); /* shlr8 r0 → region */                 \
+    sh4_emit16(0x8800 | 0x07); /* cmp/eq #7, r0 (OAM?) */                   \
+    u8 *_w32_oam = translation_ptr;                                           \
+    sh4_emit16(0x8900); /* bt -> oam_u32 */                                  \
+    /* not OAM: C fallback */                                                 \
+    sh4_emit16(0x4022 | (15 << 8)); /* sts.l pr, @-r15 */                    \
+    generate_load_imm(0, (u32)write_memory32);                                \
+    sh4_emit16(0x400B | (0 << 8)); /* jsr @r0 */                             \
+    sh4_emit16(0x0009); /* nop */                                              \
+    sh4_emit16(0x4026 | (15 << 8)); /* lds.l @r15+, pr */                    \
+    u8 *_w32_c_done = translation_ptr;                                        \
+    sh4_emit16(0xA000); /* bra -> done */                                    \
+    sh4_emit16(0x0009); /* nop */                                              \
+    /* -- OAM u32: store + set flag -- */                                     \
+    *(u16*)_w32_oam = 0x8900 |                                                \
+      (((translation_ptr - _w32_oam - 4) / 2) & 0xFF);                      \
+    /* offset = address & 0x3FC */                                            \
+    sh4_emit16(0x6003 | (0 << 8) | (reg_a0 << 4)); /* mov a0, r0 */         \
+    sh4_emit16(0xE000 | (2 << 8) | 4); /* mov #4, r2 */                     \
+    sh4_emit16(0x4018 | (2 << 8)); /* shll8 r2 → 0x400 */                  \
+    sh4_emit16(0x7000 | (2 << 8) | ((-4) & 0xFF)); /* add #-4, r2 → 0x3FC */ \
+    sh4_emit16(0x2009 | (0 << 8) | (2 << 4)); /* and r2, r0 */             \
+    generate_load_imm(1, (u32)oam_ram);                                       \
+    sh4_emit16(0x0156); /* mov.l r5, @(r0,r1) */                            \
+    /* reg[OAM_UPDATED] = 1 */                                               \
+    sh4_emit16(0xE000 | (0 << 8) | 1); /* mov #1, r0 */                     \
+    generate_store_reg(0, OAM_UPDATED);                                       \
+    sh4_emit16(0xE000 | (0 << 8) | 0); /* mov #0, r0 (ALERT_NONE) */        \
+    /* fall through to done */                                                \
+    *(u16*)_w32_done = 0xA000 |                                               \
+      (((translation_ptr - _w32_done - 4) / 2) & 0xFFF);                    \
+    *(u16*)_w32_c_done = 0xA000 |                                             \
+      (((translation_ptr - _w32_c_done - 4) / 2) & 0xFFF);                  \
+  } while(0)
 
 #define arm_access_memory_store(mem_type)                                      \
   cycle_count++;                                                              \

@@ -2267,6 +2267,13 @@ void init_memory(void)
   map_null(read, 0x7000000, 0x8000000);
   map_null(read, 0xE000000, 0x10000000);
 
+  // Write map: only EWRAM, IWRAM, VRAM get direct-store entries.
+  // Everything else (BIOS, IO, palette, OAM, ROM) stays NULL.
+  memset(memory_map_write, 0, sizeof(memory_map_write));
+  map_region(write, 0x2000000, 0x3000000, 8, ewram);
+  map_region(write, 0x3000000, 0x4000000, 1, &iwram[0x8000]);
+  map_vram(write);
+
   memset(io_registers, 0, sizeof(io_registers));
   memset(oam_ram, 0, sizeof(oam_ram));
   memset(palette_ram, 0, sizeof(palette_ram));
